@@ -162,6 +162,11 @@
 
 void wm8758_init(void);
 void wm8758_mute(bool mute);
+
+/* Pop-suppressed power-down: mute, discharge VMID, drop all power rails. The
+ * codec is left cold — call wm8758_init() (per track via hal_audio_init) to
+ * bring it back. Call while MCLK is still running; gate clocks afterwards. */
+void wm8758_powerdown(void);
 #endif
 
 #endif /* CORE_HAL_HW_WM8758_H */

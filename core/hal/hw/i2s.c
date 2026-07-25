@@ -82,6 +82,18 @@ void i2s_tx_enable(void)
     mmio_write32(IISCONFIG_ADDR, mmio_read32(IISCONFIG_ADDR) | IIS_TXFIFOEN);
 }
 
+void i2s_disable(void)
+{
+    /* Stop clocking the TX FIFO, then gate the I2S block clock AND the external
+     * device clocks that feed the codec MCLK — both left running after playback
+     * today. i2s_init() re-pulses reset and re-ungates both on the next track,
+     * so this is safe to do whenever audio is fully stopped (the codec must
+     * already be powered down: MCLK is what its power-down sequence rode on). */
+    mmio_write32(IISCONFIG_ADDR, mmio_read32(IISCONFIG_ADDR) & ~IIS_TXFIFOEN);
+    mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) & ~DEV_EXTCLOCKS);
+    mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) & ~DEV_I2S);
+}
+
 int i2s_write_stereo(int16_t left, int16_t right)
 {
     uint32_t spin = I2S_TXFREE_SPIN_LIMIT;

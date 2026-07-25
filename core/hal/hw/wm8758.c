@@ -116,3 +116,31 @@ void wm8758_mute(bool mute)
 {
     wm8758_write(WM_DACCTRL, mute ? DACCTRL_SOFTMUTE : DACCTRL_DACOSR128);
 }
+
+/*
+ * Pop-suppressed power-DOWN — the datasheet "Recommended Power Down Sequence"
+ * run in the reverse spirit of init_seq: soft-mute the DAC and mute the
+ * headphone outputs FIRST (so nothing is live when the rails collapse), assert
+ * POBCTRL + VMIDTOG to discharge VMID through the pop-suppression path, then
+ * drop the output amps, the VMID/BIAS/PLL rail, and the DAC/mixers. Leaves the
+ * codec cold; the next wm8758_init() (issued per track via hal_audio_init) does
+ * a full WM_RESET + pop-suppressed bring-up, so this is fully recoverable and
+ * resume audio is clean. Delay-free (MCLK is still running when this is called;
+ * the caller gates clocks AFTER).
+ */
+static const struct wm_write powerdown_seq[] = {
+    { WM_DACCTRL,   DACCTRL_SOFTMUTE },                       /* ramp DAC to mute   */
+    { WM_LOUT1VOL,  OUTVOL_VU | OUTVOL_MUTE },                /* mute HP outputs    */
+    { WM_ROUT1VOL,  OUTVOL_VU | OUTVOL_MUTE },
+    { WM_OUT4TOADC, OUT4TOADC_POBCTRL | OUT4TOADC_VMIDTOG },  /* pop ctrl + VMID discharge */
+    { WM_PWRMGMT2,  0 },                                      /* output amps off    */
+    { WM_PWRMGMT1,  0 },                                      /* VMID + BIAS + PLL off */
+    { WM_PWRMGMT3,  0 },                                      /* DAC + mixers off   */
+};
+
+void wm8758_powerdown(void)
+{
+    for (unsigned i = 0; i < sizeof powerdown_seq / sizeof powerdown_seq[0]; i++) {
+        wm8758_write(powerdown_seq[i].reg, powerdown_seq[i].data);
+    }
+}

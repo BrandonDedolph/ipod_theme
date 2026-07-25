@@ -25,6 +25,10 @@ void i2s_init(void);
 /* Enable the transmitter (start clocking the TX FIFO out to the codec). */
 void i2s_tx_enable(void);
 
+/* Stop the TX FIFO and gate the I2S + external (codec MCLK) clocks. Reversed by
+ * the next i2s_init(). Call only after the codec is powered down. */
+void i2s_disable(void);
+
 /*
  * Write one packed stereo frame, blocking (bounded) until the TX FIFO
  * has a free slot. Returns 0 on success, -1 if no slot freed within the

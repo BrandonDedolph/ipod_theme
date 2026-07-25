@@ -2653,11 +2653,19 @@ _Noreturn static void run_ui(fat32_t *fs)
          * screen. If they're browsing elsewhere when the queue ends, leave them
          * where they are (don't yank them out of a menu mid-navigation). */
         int now_active = player_active();
-        if (was_active && !now_active && scr_cur() == SCR_NOWPLAYING) {
-            g_scr_n = 1;
-            g_scr[0] = SCR_MENU;
-            g_main_sel = 0;
-            dirty = 1;
+        if (was_active && !now_active) {
+            /* Playback truly ended (stop / queue exhausted / skip past the ends —
+             * NOT an inter-track advance, which never reads inactive here since
+             * advance+open complete inside one player_pump). Power the codec down
+             * and gate the audio clocks; the next track's hal_audio_init does a
+             * full pop-suppressed bring-up, so resume is clean. */
+            hal_audio_close();
+            if (scr_cur() == SCR_NOWPLAYING) {
+                g_scr_n = 1;
+                g_scr[0] = SCR_MENU;
+                g_main_sel = 0;
+                dirty = 1;
+            }
         }
         was_active = now_active;
         if (battery_refresh(0) && scr_cur() == SCR_CHARGING) {

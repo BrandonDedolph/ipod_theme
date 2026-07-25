@@ -159,7 +159,8 @@ void hal_audio_stop(void)
 void hal_audio_close(void)
 {
     hal_audio_stop();
-    wm8758_mute(true);
+    wm8758_powerdown();      /* codec cold (mute+VMID discharge) — MCLK still live */
+    i2s_disable();           /* then gate the I2S + codec-MCLK clocks              */
 }
 
 uint32_t audio_dma_completions(void)
