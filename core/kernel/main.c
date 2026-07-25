@@ -2639,6 +2639,7 @@ _Noreturn static void run_ui(fat32_t *fs)
     enum { BL_OFF, BL_DIM, BL_FULL };
     int      bl_state   = BL_FULL;
     int      cpu_idled  = 0;              /* core dropped to 30 MHz for deep idle   */
+    int      panel_slept = 0;            /* LCD panel put to sleep at backlight-off */
     uint32_t last_input = mmio_read32(USEC_TIMER_ADDR);
 
     const char *last_tn = 0;              /* re-apply volume on track change       */
@@ -3089,6 +3090,8 @@ _Noreturn static void run_ui(fat32_t *fs)
         } else if (bl_state == BL_DIM && idle > off_us) {
             backlight_set(0);
             bl_state = BL_OFF;
+            lcd_sleep();                  /* blank the panel too, not just the LED */
+            panel_slept = 1;
         }
 
         /* Idle CPU-clock scaling: once the screen has timed fully off AND nothing
@@ -3120,6 +3123,16 @@ _Noreturn static void run_ui(fat32_t *fs)
         if ((!player_active() || player_is_paused())
             && !ata_is_parked() && idle > disk_idle_us) {
             ata_standby();
+        }
+
+        /* Panel wake: the instant we leave the fully-off state, re-enable the LCD
+         * panel BEFORE any present happens this iteration (the lock-plate flash or
+         * the render block below). One central check covers every wake path, so no
+         * individual input site needs patching. lcd_wake() only restores the
+         * panel-enable bits — the following present re-lights and repaints. */
+        if (panel_slept && bl_state != BL_OFF) {
+            lcd_wake();
+            panel_slept = 0;
         }
 
         /* Lock/unlock plate takes over the screen for ~1s on a Hold edge. Paint
