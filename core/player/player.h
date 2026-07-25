@@ -85,6 +85,11 @@ void player_set_repeat(int mode);
 /* 1 while a track is loaded (playing OR paused). */
 int  player_active(void);
 
+/* 1 while playback is paused (a track is loaded but the DAC is stopped). Lets
+ * callers distinguish "actively playing" (needs the disk for anti-skip refills)
+ * from "paused" (drive can safely spin down). */
+int  player_is_paused(void);
+
 /* Tags + duration of the current track (parsed at open; fields empty/0 when a
  * tag is absent — fall back to the filename). */
 const flac_meta_t *player_meta(void);

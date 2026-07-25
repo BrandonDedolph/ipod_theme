@@ -49,4 +49,12 @@ int ata_standby(void);
  */
 int ata_wakeup(void);
 
+/*
+ * 1 while the platters are spun down (after ata_standby(), until the next read
+ * or ata_wakeup() spins them back up). The single shared truth about drive
+ * power state — the UI idle-timer parks only when this is 0, so it never
+ * re-issues STANDBY on an already-parked drive.
+ */
+int ata_is_parked(void);
+
 #endif /* CORE_HAL_HW_ATA_H */

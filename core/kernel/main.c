@@ -3105,6 +3105,23 @@ _Noreturn static void run_ui(fat32_t *fs)
             cpu_idled = 1;
         }
 
+        /* Disk spin-down at idle: once nothing needs the drive AND the user has
+         * been idle a while, park the platters — the single largest continuous
+         * draw on a spinning-HDD unit. "Nothing needs it" = not actively playing;
+         * PAUSED counts as idle (resume plays from the ~73 s RAM anti-skip buffer
+         * and the drive spins up lazily on the next fill, so no gap). The next
+         * real read self-recovers — ata_wait_drq tolerates the multi-second
+         * spin-up — so no explicit wake is wired here. Skipped while actively
+         * playing: player.c already parks the drive between bursts and owns that
+         * cadence. ata_is_parked() is the shared truth, so we never re-issue
+         * STANDBY on an already-parked drive. On an iFlash/SSD mod this is a
+         * harmless no-op. */
+        const uint32_t disk_idle_us = 20000000u;   /* 20 s: saves ~100 mA, no thrash */
+        if ((!player_active() || player_is_paused())
+            && !ata_is_parked() && idle > disk_idle_us) {
+            ata_standby();
+        }
+
         /* Lock/unlock plate takes over the screen for ~1s on a Hold edge. Paint
          * the context + plate once, hold it, then repaint underneath when it
          * fades. Suppresses the normal render while up. */

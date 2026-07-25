@@ -150,6 +150,16 @@ int ata_identify(void *buf)
  * ATA_PHYS_LOG) or the drive returns IDNF — the ata_read_sectors wrapper
  * guarantees that.
  */
+
+/* Authoritative "platters spun down" state for the whole system. Set by
+ * ata_standby(), cleared the moment any READ command is issued (a read
+ * transparently spins the drive back up) or by an explicit ata_wakeup().
+ * Read via ata_is_parked() so the UI idle-timer and the player's burst-park
+ * logic share ONE truth about the drive instead of each guessing. */
+static int g_ata_parked;
+
+int ata_is_parked(void) { return g_ata_parked; }
+
 static int ata_read_raw(uint32_t lba, uint32_t count, void *buf)
 {
     if (count == 0 || count > 256) {
@@ -168,6 +178,7 @@ static int ata_read_raw(uint32_t lba, uint32_t count, void *buf)
                 (uint8_t)(ATA_SELECT_OBS | ATA_SELECT_LBA |
                           ((lba >> 24) & 0x0F)));
     mmio_write8(ATA_COMMAND_ADDR, ATA_CMD_READ_SECTORS);
+    g_ata_parked = 0;               /* a READ spins the drive up (see ata_wait_drq) */
 
     /* Command-to-status pipeline guard (~sub-microsecond). A short bounded
      * spin rather than asm nops so this stays host-compilable. */
@@ -262,7 +273,11 @@ int ata_standby(void)
     for (volatile uint32_t g = 0; g < 64; g++) {
         /* command-to-status settle */
     }
-    return ata_wait_not_busy();     /* accepted; platters coast down on their own */
+    int rc = ata_wait_not_busy();   /* accepted; platters coast down on their own */
+    if (rc == 0) {
+        g_ata_parked = 1;
+    }
+    return rc;
 }
 
 int ata_wakeup(void)
@@ -289,5 +304,6 @@ int ata_wakeup(void)
     for (int w = 0; w < 256; w++) {
         (void)mmio_read16(ATA_DATA_ADDR);
     }
+    g_ata_parked = 0;               /* fully spun up and confirmed transferable */
     return 0;
 }
