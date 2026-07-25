@@ -104,7 +104,7 @@ void uart_puts(const char *s)
 
 void uart_put_hex32(uint32_t v)
 {
-    static const char hex[16] = "0123456789ABCDEF";
+    static const char hex[] = "0123456789ABCDEF";   /* 17 B incl NUL; idx 0..15 */
 
     for (int shift = 28; shift >= 0; shift -= 4) {
         uart_tx_byte((uint8_t)hex[(v >> shift) & 0xF]);
