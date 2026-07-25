@@ -2722,6 +2722,11 @@ _Noreturn static void run_ui(fat32_t *fs)
             hold_prev = held;
             g_locked  = held;
             g_lock_flash_until = mmio_read32(USEC_TIMER_ADDR) + 1000000u;
+            /* Force the plate to REPAINT for the new state. Without this, a second
+             * edge (e.g. on->off within the 1 s window) leaves lock_flashing set
+             * from the first edge, so the render guard (!lock_flashing) suppresses
+             * the new plate and the unlock modal never shows. */
+            lock_flashing = 0;
             last_input = mmio_read32(USEC_TIMER_ADDR);   /* wake the backlight    */
             if (bl_state != BL_FULL) {
                 backlight_set(g_settings.backlight_bright);
