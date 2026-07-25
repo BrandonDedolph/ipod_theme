@@ -2638,6 +2638,7 @@ _Noreturn static void run_ui(fat32_t *fs)
      * a real iPod's first touch does). Playback keeps running the whole time. */
     enum { BL_OFF, BL_DIM, BL_FULL };
     int      bl_state   = BL_FULL;
+    int      cpu_idled  = 0;              /* core dropped to 30 MHz for deep idle   */
     uint32_t last_input = mmio_read32(USEC_TIMER_ADDR);
 
     const char *last_tn = 0;              /* re-apply volume on track change       */
@@ -3090,6 +3091,20 @@ _Noreturn static void run_ui(fat32_t *fs)
             bl_state = BL_OFF;
         }
 
+        /* Idle CPU-clock scaling: once the screen has timed fully off AND nothing
+         * is playing, drop the core 80->30 MHz — only the disk/decode path needs
+         * 80. Restore the instant there's life again: any wake back to BL_FULL, or
+         * playback starting. Rides the same refcounted boost the boot path took, so
+         * it stays balanced (idle unboost 1->0, wake boost 0->1) and re-boosts
+         * before the render/decode work later in this same iteration. */
+        if (cpu_idled && (bl_state != BL_OFF || player_active())) {
+            cpu_boost();
+            cpu_idled = 0;
+        } else if (!cpu_idled && bl_state == BL_OFF && !player_active()) {
+            cpu_unboost();
+            cpu_idled = 1;
+        }
+
         /* Lock/unlock plate takes over the screen for ~1s on a Hold edge. Paint
          * the context + plate once, hold it, then repaint underneath when it
          * fades. Suppresses the normal render while up. */
@@ -3102,9 +3117,10 @@ _Noreturn static void run_ui(fat32_t *fs)
                 dirty = 0;
             }
             lock_flashing = 1;
-            /* Only throttle when idle; keep audio paced while playing. */
+            /* Only throttle when idle; keep audio paced while playing. Halt the
+             * core (self-waking ~10 ms, one tick) instead of a busy-spin. */
             if (!player_active()) {
-                for (volatile uint32_t d = 0; d < (1u << 15); d++) { }
+                cpu_wait_ms(10);
             }
             continue;                     /* skip the normal render this pass      */
         }
@@ -3288,10 +3304,11 @@ _Noreturn static void run_ui(fat32_t *fs)
         }
 
         /* Only throttle when idle; while playing, player_pump's decode_step
-         * paces the loop and the wheel stays responsive. */
+         * paces the loop and the wheel stays responsive. Halt the core until the
+         * next tick (self-waking ~10 ms) instead of a busy-spin: input is latched
+         * by the 100 Hz timer ISR, so this costs no responsiveness. */
         if (!player_active()) {
-            for (volatile uint32_t d = 0; d < (1u << 15); d++) {
-            }
+            cpu_wait_ms(10);
         }
     }
 }
