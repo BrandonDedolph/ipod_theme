@@ -55,4 +55,20 @@ size_t            mmio_mock_log_len(void);
 /* Convenience: count recorded events of a given op+addr (any width). */
 size_t mmio_mock_count(mmio_op op, uint32_t addr);
 
+/*
+ * Post-access hook, invoked with the event that was just recorded.
+ *
+ * Exists for drivers that DELIBERATELY never return: hal/hw/power.c's
+ * power_standby() ends in an intentional `for (;;)` because the PMU is about
+ * to cut power, so a host test that simply called it would hang. The hook lets
+ * the test observe the transaction and longjmp out at the exact access that
+ * completes it, which is the only way to assert power_standby's grammar
+ * without editing the driver.
+ *
+ * Cleared by mmio_mock_reset(); pass NULL to clear it explicitly. The hook
+ * must not call back into the mock bus.
+ */
+typedef void (*mmio_mock_hook_fn)(const mmio_event *e);
+void mmio_mock_set_hook(mmio_mock_hook_fn fn);
+
 #endif /* CORE_TESTS_HW_MMIO_MOCK_H */

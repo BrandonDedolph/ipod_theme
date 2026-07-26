@@ -25,7 +25,14 @@ EXP_START="0"
 # 1 KB below (0x40017C00).
 EXP_IRQ_STACK_TOP="40018000"
 EXP_STACK_TOP="40017c00"
-SDRAM_SIZE_5_5G=$((0x04000000))   # 64 MB — .bss must fit below this
+# The linker script is the authority, not the largest device we might run on.
+# boot/linker.ld declares SDRAM LENGTH = 32M *deliberately*: the 5G has 32 MB
+# and the 5.5G has 64 MB, and keeping the image inside the low 32 MB is what
+# makes ONE image bootable on both. This check previously allowed 64 MB, which
+# both encoded the wrong device and was weaker than the linker it is supposed to
+# corroborate — a .bss between 32 and 64 MB would have failed the link while
+# passing here. Keep this in step with linker.ld's MEMORY block.
+SDRAM_WINDOW=$((0x02000000))   # 32 MB — must match boot/linker.ld SDRAM LENGTH
 
 fails=0
 note() { printf 'FAIL: %s\n' "$1"; fails=$((fails + 1)); }
@@ -63,7 +70,7 @@ if [ -n "$BSS_S" ] && [ -n "$BSS_E" ]; then
     [ $((s % 4)) -eq 0 ] || note "__bss_start 0x$BSS_S not word-aligned"
     [ $((e % 4)) -eq 0 ] || note "__bss_end 0x$BSS_E not word-aligned"
     [ "$e" -ge "$s" ]    || note "__bss_end < __bss_start (0x$BSS_E < 0x$BSS_S)"
-    [ "$e" -le "$SDRAM_SIZE_5_5G" ] || note "__bss_end 0x$BSS_E past SDRAM end"
+    [ "$e" -le "$SDRAM_WINDOW" ] || note "__bss_end 0x$BSS_E past the 32 MB SDRAM window (linker.ld)"
 else
     note "__bss_start/__bss_end symbols missing"
 fi

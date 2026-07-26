@@ -9,10 +9,27 @@ if target == 'sim'
   cc = meson.get_compiler('c')
   m_dep = cc.find_library('m', required: false)
 
+  # TEST BUILD OPTIONS — deliberately NOT the firmware's.
+  #
+  # The project defaults are tuned for the thing that ships on a 32 MB
+  # ARM7TDMI: -Os with LTO. Those are the wrong defaults for a test binary.
+  # -Os inlines and reorders until a crash's stack trace names the wrong
+  # function, and LTO can optimize away exactly the undefined behaviour a
+  # sanitizer build exists to catch (a dead store past the end of an array
+  # simply disappears). Tests want to be readable under a debugger and honest
+  # under ASan/UBSan, and they are never size-constrained.
+  #
+  # -O1 rather than -O0: still fully debuggable, but keeps the codec KATs and
+  # the 60-pick shuffle loops fast enough that nobody is tempted to skip the
+  # suite. Applied per-target via override_options so the vendored codec
+  # libraries the tests link against keep the firmware's own settings.
+  test_opts = ['optimization=1', 'b_lto=false']
+
   codec_kat = executable(
     'codec_kat',
     sources: ['codec_kat.c'],
     dependencies: [codecs_dep, m_dep],
+    override_options: test_opts,
   )
 
   vectors_dir = meson.current_source_dir() / 'codec-vectors'
@@ -33,6 +50,7 @@ if target == 'sim'
     sources: ['codecs/flac_freestanding_test.c', '../codecs/arena.c'],
     dependencies: [flac_dep],
     include_directories: include_directories('../codecs', '../codecs/dr_flac'),
+    override_options: test_opts,
   )
   test('flac-freestanding', flac_fs_test, args: [vectors_dir], suite: 'unit')
 
@@ -47,6 +65,7 @@ if target == 'sim'
     sources: ['codecs/mp3_freestanding_test.c', '../codecs/arena.c'],
     dependencies: [mp3_dep],
     include_directories: include_directories('../codecs', '../codecs/dr_mp3'),
+    override_options: test_opts,
   )
   test('mp3-freestanding', mp3_fs_test, args: [vectors_dir], suite: 'unit')
 
@@ -59,6 +78,7 @@ if target == 'sim'
     'readahead_test',
     sources: ['codecs/readahead_test.c', '../codecs/readahead.c'],
     include_directories: include_directories('../codecs'),
+    override_options: test_opts,
   )
   test('readahead', readahead_test, suite: 'unit')
 
@@ -74,6 +94,7 @@ if target == 'sim'
     'flac_meta_test',
     sources: ['codecs/flac_meta_test.c', '../codecs/flac_meta.c'],
     include_directories: include_directories('../codecs'),
+    override_options: test_opts,
   )
   test('flac-meta', flac_meta_test, args: [vectors_dir], suite: 'unit')
 
@@ -86,6 +107,7 @@ if target == 'sim'
     'diskbuf_test',
     sources: ['codecs/diskbuf_test.c', '../codecs/diskbuf.c'],
     include_directories: include_directories('../codecs'),
+    override_options: test_opts,
   )
   test('diskbuf', diskbuf_test, suite: 'unit')
 
@@ -100,6 +122,7 @@ if target == 'sim'
     'text_test',
     sources: ['ui/text_test.c', '../ui/text.c'],
     include_directories: include_directories('../ui'),
+    override_options: test_opts,
   )
   test('text', text_test, suite: 'unit')
 
@@ -113,6 +136,7 @@ if target == 'sim'
     'thumb_test',
     sources: ['ui/thumb_test.c', '../ui/thumb.c'],
     include_directories: include_directories('../ui'),
+    override_options: test_opts,
   )
   test('thumb', thumb_test, suite: 'unit')
 
@@ -126,6 +150,7 @@ if target == 'sim'
     'settings_test',
     sources: ['ui/settings_test.c', '../ui/settings.c'],
     include_directories: include_directories('../ui'),
+    override_options: test_opts,
   )
   test('settings', settings_test, suite: 'unit')
 
@@ -133,6 +158,7 @@ if target == 'sim'
     'tag_mp3_test',
     sources: ['tag_mp3_test.c'],
     dependencies: [codecs_dep],
+    override_options: test_opts,
   )
   test('tag-mp3', tag_mp3_test, suite: 'unit')
 
@@ -153,6 +179,7 @@ if target == 'sim'
               '../hal/hw/uart.c'],
     include_directories: hw_mmio_inc,
     c_args: ['-DMMIO_MOCK', '-Wno-unterminated-string-initialization'],
+    override_options: test_opts,
   )
   test('hw-uart-trace', uart_trace_test, suite: 'unit')
 
@@ -163,6 +190,7 @@ if target == 'sim'
               '../hal/hw/lcd.c'],
     include_directories: hw_mmio_inc,
     c_args: ['-DMMIO_MOCK', '-Wno-unterminated-string-initialization'],
+    override_options: test_opts,
   )
   test('hw-lcd-trace', lcd_trace_test, suite: 'unit')
 
@@ -192,6 +220,7 @@ if target == 'sim'
               '../kernel/sched.c'],
     include_directories: include_directories('../kernel'),
     c_args: ['-DSCHED_TEST'],
+    override_options: test_opts,
   )
   test('hw-sched', sched_test, suite: 'unit')
 
@@ -212,6 +241,7 @@ if target == 'sim'
               'hw_mmio/mmio_mock.c'],
     include_directories: include_directories('../hal', '../hal/hw', '../kernel', 'hw_mmio'),
     c_args: ['-DMMIO_MOCK'],
+    override_options: test_opts,
   )
   test('hw-timer', timer_test, suite: 'unit')
 
@@ -225,6 +255,7 @@ if target == 'sim'
               'hw_mmio/mmio_mock.c'],
     include_directories: include_directories('../hal', '../hal/hw', '../kernel', 'hw_mmio'),
     c_args: ['-DMMIO_MOCK'],
+    override_options: test_opts,
   )
   test('hw-clock', clock_test, suite: 'unit')
 
@@ -247,6 +278,7 @@ if target == 'sim'
               '../hal/hw/ata.c'],
     include_directories: hw_mmio_inc,
     c_args: ['-DMMIO_MOCK'],
+    override_options: test_opts,
   )
   test('hw-audio', audio_trace_test, suite: 'unit')
 
@@ -261,7 +293,8 @@ if target == 'sim'
       command: [py, files('scripts' / 'make_fat32_image.py'), '@OUTPUT@'])
     fat32_test = executable('fat32_test',
       sources: ['fs/fat32_test.c', '../fs/fat32.c'],
-      include_directories: include_directories('../fs'))
+      include_directories: include_directories('../fs'),
+      override_options: test_opts)
     test('fat32', fat32_test, args: [fat32_img], suite: 'unit')
   endif
 
@@ -274,6 +307,7 @@ if target == 'sim'
     'pcm_ring_test',
     sources: ['kernel/pcm_ring_test.c', '../kernel/pcm_ring.c'],
     include_directories: include_directories('../kernel'),
+    override_options: test_opts,
   )
   test('pcm-ring', pcm_ring_test, suite: 'unit')
 
@@ -283,6 +317,7 @@ if target == 'sim'
     'console_test',
     sources: ['hw_console/console_test.c', '../kernel/console.c'],
     include_directories: include_directories('../kernel', '../hal'),
+    override_options: test_opts,
   )
   test('hw-console', console_test, suite: 'unit')
 
@@ -299,6 +334,7 @@ if target == 'sim'
               '../hal/hw/clickwheel.c'],
     include_directories: hw_mmio_inc,
     c_args: ['-DMMIO_MOCK'],
+    override_options: test_opts,
   )
   test('hw-clickwheel', clickwheel_test, suite: 'unit')
 
@@ -312,6 +348,7 @@ if target == 'sim'
               '../hal/hw/lcd.c'],
     include_directories: include_directories('../hal', '../hal/hw', 'hw_mmio'),
     c_args: ['-DMMIO_MOCK', '-Wno-unterminated-string-initialization'],
+    override_options: test_opts,
   )
   test('hw-lcd-present', lcd_present_test, suite: 'unit')
 
@@ -329,6 +366,7 @@ if target == 'sim'
               '../hal/hw/backlight.c'],
     include_directories: hw_mmio_inc,
     c_args: ['-DMMIO_MOCK'],
+    override_options: test_opts,
   )
   test('hw-backlight', backlight_trace_test, suite: 'unit')
 
@@ -351,6 +389,7 @@ if target == 'sim'
               '../hal/hw/i2c.c'],
     include_directories: hw_mmio_inc,
     c_args: ['-DMMIO_MOCK'],
+    override_options: test_opts,
   )
   test('hw-battery', battery_trace_test, suite: 'unit')
 
@@ -369,6 +408,145 @@ if target == 'sim'
               '../hal/hw/i2c.c'],
     include_directories: hw_mmio_inc,
     c_args: ['-DMMIO_MOCK'],
+    override_options: test_opts,
   )
   test('hw-volume', volume_trace_test, suite: 'unit')
+
+  # ------------------------------------------------------------------
+  # Tests added by the build/test hardening pass. Each covers a surface
+  # that previously had none; several assert the DOCUMENTED contract and
+  # mark the gaps against today's code as expected failures (tests/xfail.h)
+  # rather than being weakened until they pass. Run the suite with
+  # CORE_TEST_STRICT_XFAIL=1 to see whether those gaps have been closed.
+  # ------------------------------------------------------------------
+
+  # power-standby: the single most dangerous write in the firmware — the
+  # PCF50605 GOSTDBY latch. Getting OOCC1 wrong (wake bits dropped, wrong
+  # register, wrong device) leaves an iPod that cannot be powered on again
+  # without disassembly. battery.c and volume.c, which can at worst misreport
+  # a percentage, both had trace tests over this same i2c_send path; this one
+  # had none. Asserts the exact transaction, plus the invariants restated
+  # independently of event order so a bounded-retry rewrite doesn't break it.
+  # power_standby() deliberately never returns, so the test escapes via the
+  # mock bus's post-access hook (and a watchdog for the path that strobes
+  # nothing at all).
+  power_trace_test = executable(
+    'power_trace_test',
+    sources: ['hw_mmio/power_trace_test.c',
+              'hw_mmio/mmio_mock.c',
+              '../hal/hw/power.c',
+              '../hal/hw/i2c.c'],
+    include_directories: hw_mmio_inc,
+    c_args: ['-DMMIO_MOCK'],
+    override_options: test_opts,
+  )
+  test('hw-power-standby', power_trace_test, suite: 'unit')
+
+  # hw-audio-pingpong: the ping-pong PCM buffer state machine in
+  # hal/hw/audio.c. audio_trace_test asserts the register grammar of the
+  # driver chain but never calls hal_audio_start / audio_dma_isr /
+  # hal_audio_stop, so the code that decides which bytes reach the DAC was
+  # untested. Registers a counting source and drives synthetic completions:
+  # asserts the two buffers strictly alternate, that audio is neither
+  # repeated nor dropped across completions, that a short source read
+  # zero-pads exactly the tail, and (as a documented expected failure) that
+  # stop-then-start resumes where it left off. Written against hal/hal.h's
+  # contract, not the buffer size — that is a tuning knob and the test
+  # discovers it at runtime.
+  audio_pingpong_test = executable(
+    'audio_pingpong_test',
+    sources: ['hw_audio/audio_pingpong_test.c',
+              'hw_audio/audio_test_stubs.c',
+              'hw_mmio/mmio_mock.c',
+              '../hal/hw/audio.c',
+              '../hal/hw/i2c.c',
+              '../hal/hw/wm8758.c',
+              '../hal/hw/i2s.c',
+              '../hal/hw/dma.c'],
+    include_directories: [hw_mmio_inc, include_directories('../kernel', '.')],
+    c_args: ['-DMMIO_MOCK'],
+    override_options: test_opts,
+  )
+  test('hw-audio-pingpong', audio_pingpong_test, suite: 'unit')
+
+  # name-hash: the library locator hash. It exists three times — in
+  # kernel/main.c (device), in tools/build_index.py (host), and in the
+  # verbatim copy here that makes it testable — and it is the ONLY thing
+  # binding a CORELIB.IDX record to its file on disk. If two copies disagree
+  # the track does not error, it silently stops resolving. Asserts a golden
+  # vector table covering ASCII/case, Latin-1, smart quotes, dashes,
+  # punctuation, CJK, and (as documented expected failures) astral
+  # codepoints, where main.c's re-encoder has no 4-byte branch. The Python
+  # half and the copy-vs-original diff run in hw-name-hash-parity below.
+  name_hash_test = executable(
+    'name_hash_test',
+    sources: ['kernel/name_hash_test.c', 'kernel/name_hash_ref.c'],
+    include_directories: include_directories('kernel'),
+    override_options: test_opts,
+  )
+  test('name-hash', name_hash_test, suite: 'unit')
+
+  # player-queue: the queue / auto-advance / repeat / shuffle logic of
+  # core/player/player.c — 753 lines with no test at all, and the part users
+  # notice when it is wrong (a queue that stops a track early, a Repeat All
+  # that doesn't wrap, a Shuffle that replays what just played, a broken file
+  # that stalls instead of being skipped). The REAL player.c is compiled
+  # unmodified; its disk, codec and DAC are the controllable fakes in
+  # player_test_stubs.c, and the real pcm_ring.c is linked because the
+  # player's use of the ring is part of what is under test. Which entry the
+  # player chose is read back from the cluster the decoder was opened on, so
+  # the assertions are about the file that would actually play.
+  player_queue_test = executable(
+    'player_queue_test',
+    sources: ['player/player_queue_test.c',
+              'player/player_test_stubs.c',
+              'hw_mmio/mmio_mock.c',
+              '../player/player.c',
+              '../kernel/pcm_ring.c'],
+    include_directories: include_directories(
+      '../player', '../hal', '../hal/hw', '../fs', '../kernel',
+      '../codecs', '../codecs/dr_flac', '../codecs/dr_mp3',
+      'hw_mmio', 'player', '.'),
+    c_args: ['-DMMIO_MOCK', '-DCORE_FREESTANDING'],
+    override_options: test_opts,
+  )
+  test('player-queue', player_queue_test, suite: 'unit')
+
+  if py.found()
+    # fat32-corrupt: the FAT32 reader against deliberately broken volumes.
+    # fat32_test is entirely happy-path, yet this parser consumes whatever is
+    # on a user's disk. Each image is one realistic way that goes wrong — a
+    # looping FAT chain, cluster numbers outside the data region, a genuine
+    # FAT16 boot sector, LFN runs with a mismatched checksum or no 8.3 entry,
+    # and a volume truncated mid-transfer — and the assertion is always the
+    # same: fail cleanly and bounded, never hang, never read out of bounds.
+    # Boundedness is measured by a counting block device rather than a
+    # timeout, so a non-terminating walk is a deterministic finding.
+    fat32_corrupt_imgs = []
+    foreach v : ['good', 'cyclic-fat', 'oob-cluster', 'fat16-bpb',
+                 'orphan-lfn', 'truncated']
+      fat32_corrupt_imgs += custom_target('fat32-img-' + v,
+        output: v + '.img',
+        command: [py, files('scripts' / 'make_fat32_image.py'),
+                  '@OUTPUT@', '--variant', v])
+    endforeach
+
+    fat32_corrupt_test = executable('fat32_corrupt_test',
+      sources: ['fs/fat32_corrupt_test.c', '../fs/fat32.c'],
+      include_directories: include_directories('../fs', '.'),
+      override_options: test_opts)
+    test('fat32-corrupt', fat32_corrupt_test,
+         args: [meson.current_build_dir()],
+         depends: fat32_corrupt_imgs,
+         suite: 'unit')
+
+    # hw-name-hash-parity: the Python half of the locator-hash test, plus the
+    # check that the verbatim copy in tests/kernel/name_hash_ref.c has not
+    # drifted from kernel/main.c. Without the diff the C test could pass
+    # against a fossil while the device runs something else.
+    test('hw-name-hash-parity', py,
+         args: [meson.current_source_dir() / 'scripts' /
+                'check_name_hash_parity.py'],
+         suite: 'unit')
+  endif
 endif

@@ -209,6 +209,9 @@ int main(void)
         int idle_when_full = (cs.n_reads == reads_before_idle);
         check("pump-fills-to-high", filled_high);
         check("pump-idle-when-full", idle_when_full);
+        /* The burst is what the whole buffer exists for: the fill must take a
+         * bounded run of pumps and then STOP, not one read per pump forever. */
+        check("pump-burst-then-stops", burst_reads > 0 && burst_reads < 200);
 
         /* Drain a little (above low): pump must STAY idle — the hysteresis. */
         uint8_t sink[4096];

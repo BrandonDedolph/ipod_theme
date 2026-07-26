@@ -33,7 +33,23 @@ common_c_args = [
   '-fdata-sections',
   '-Wundef',
   '-Wshadow',
-  '-Wno-unused-parameter',     # too noisy in driver stubs during scaffold
+  # NOTE: -Wno-unused-parameter used to live here ("too noisy in driver stubs
+  # during scaffold"). The scaffold is gone and the suppression was hiding
+  # genuine forgot-to-use-the-argument bugs across all first-party code, so it
+  # is no longer global. The vendored codec blocks below still list it in their
+  # own suppression sets, which is where it belongs.
+  #
+  # gcc 16 added -Wunterminated-string-initialization, which fires on the
+  # deliberate `static const char hex[16] = "0123456789ABCDEF"` lookup tables in
+  # hal/hw/uart.c and hal/hw/lcd.c (exactly-sized char arrays, never used as C
+  # strings) and broke the -Werror hw build outright on the 14->16 upgrade. The
+  # correct fix is __attribute__((nonstring)) on those two arrays, which lands
+  # separately in the files that own them. Until then this DEMOTES the
+  # diagnostic to a warning rather than silencing it (-Wno-error=, not -Wno-),
+  # so the build goes through and the arrays stay visible. REMOVE THIS once
+  # uart.c/lcd.c carry the attribute. tests/meson.build passes the stronger
+  # per-target -Wno- form for the same two files.
+  '-Wno-error=unterminated-string-initialization',
 ]
 
 common_link_args = [
@@ -48,6 +64,15 @@ if target == 'hw'
     '-fno-builtin',
     '-fno-common',
     '-fno-stack-protector',
+    # Stack-depth guard. There is no stack probe and no guard page on this
+    # target: the supervisor stack is 0x40017C00 growing down with only the
+    # 1 KB banked IRQ stack above it, so one oversized frame silently corrupts
+    # memory instead of faulting. 1024 bytes/frame is well above anything
+    # legitimate here (the deepest real frames are a few hundred bytes of
+    # dirent/sector scratch) and well below the available stack, so it catches
+    # a new multi-KB local array at compile time. Raise it only with a note
+    # about where the space came from.
+    '-Wframe-larger-than=1024',
   ]
   add_project_arguments(common_c_args, language: 'c')
   add_project_link_arguments(common_link_args, language: 'c')
@@ -239,7 +264,22 @@ if target == 'hw'
       # so no cross-observer hardware fence is needed. The __atomic builtins
       # still emit the compiler-ordering barrier we actually rely on. Absent
       # this spec the stub links anyway but warns on every build.
+      #
+      # -specs=sync-none.specs ALONE does not take effect here: the spec body is
+      # guarded by `%{!nostdlib|lgcc: --defsym=...}`, and we link with -nostdlib
+      # while -lgcc is an input FILE rather than a spec-visible switch, so the
+      # guard never fires and libgcc's warning-carrying _sync_synchronize.o was
+      # still pulled in ("This implementation of __sync_synchronize is a stub
+      # with no effect"). Passing the same --defsym the spec would have passed
+      # states the intent unconditionally and stops the archive member (and its
+      # .gnu.warning section) from ever being needed. The spec is kept so the
+      # declaration is discoverable by the usual name.
       '-specs=sync-none.specs',
+      '-Wl,--defsym=__sync_synchronize=__sync_synchronize_none',
+      # Bare-metal image: .text/.data/.bss share one RWX SDRAM segment by
+      # design (there is no MMU and no loader to honour page permissions), so
+      # ld's hardening warning about it is noise, not a finding.
+      '-Wl,--no-warn-rwx-segments',
     ],
     link_depends: boot_linker_script,
   )
@@ -253,6 +293,25 @@ if target == 'hw'
     input: core_elf,
     output: 'core.bin',
     command: [objcopy, '-O', 'binary', '@INPUT@', '@OUTPUT@'],
+    build_by_default: true,
+  )
+
+  # Post-link size / static-RAM budget gate. `ninja` runs this every time
+  # core.elf relinks: it prints the text/data/bss breakdown and FAILS the build
+  # when a section is past the budget documented in the script. Without it a new
+  # MB-scale static buffer grows .bss silently — .bss is already ~10.1 MB inside
+  # a 32 MB SDRAM window, and nothing else in the tree reports the number.
+  # The output file is just a stamp holding the printed report.
+  size_prog = find_program('arm-none-eabi-size', required: true)
+  custom_target(
+    'core-size-budget',
+    input: core_elf,
+    output: 'core.size',
+    command: [
+      find_program('sh'),
+      meson.current_source_dir() / 'tests' / 'scripts' / 'check_size.sh',
+      '@INPUT@', size_prog.full_path(), '@OUTPUT@',
+    ],
     build_by_default: true,
   )
 
