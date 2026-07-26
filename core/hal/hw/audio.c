@@ -365,7 +365,9 @@ int hal_audio_drain(uint32_t timeout_ms)
     }
     uint32_t target = g_completions + 2u;
     uint32_t t0     = mmio_read32(USEC_TIMER_ADDR);
-    uint32_t limit  = timeout_ms * 1000u;
+    /* Clamp before scaling: USEC_TIMER wraps every ~71 minutes, so anything
+     * near that is meaningless anyway, and the multiply must not overflow. */
+    uint32_t limit  = timeout_ms > 60000u ? 60000000u : timeout_ms * 1000u;
     while ((int32_t)(g_completions - target) < 0) {
         if ((uint32_t)(mmio_read32(USEC_TIMER_ADDR) - t0) > limit) {
             return -1;

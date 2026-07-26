@@ -75,9 +75,23 @@ static int g_boost;
  */
 static volatile int g_dma_active;
 
+/* A switch requested while the DMA was active, replayed when it stops. Without
+ * this a refusal is permanent for as long as audio plays — a boost declined at
+ * the start of a track would leave the core at 30 MHz for the whole track,
+ * which is worse than the hazard being avoided. */
+static int      g_pending;
+static uint32_t g_pending_pll, g_pending_timing, g_pending_freq;
+
+static void set_cpu_frequency(uint32_t pll_value, uint32_t operating_timing,
+                              uint32_t new_freq_hz);
+
 void clock_set_audio_dma_active(int active)
 {
     g_dma_active = active ? 1 : 0;
+    if (!g_dma_active && g_pending) {
+        g_pending = 0;
+        set_cpu_frequency(g_pending_pll, g_pending_timing, g_pending_freq);
+    }
 }
 
 /*
@@ -94,12 +108,18 @@ static void set_cpu_frequency(uint32_t pll_value, uint32_t operating_timing,
 {
     uint32_t spin;
 
-    /* 0. Refuse outright while audio DMA is streaming from SDRAM — see
-     *    g_dma_active. Nothing is written, and g_freq keeps reporting the
-     *    frequency we are actually running at. */
+    /* 0. Refuse while audio DMA is streaming from SDRAM — see g_dma_active.
+     *    Nothing is written, and g_freq keeps reporting the frequency we are
+     *    actually running at. The request is remembered and applied when the
+     *    stream stops, so a declined boost is deferred rather than dropped. */
     if (g_dma_active) {
+        g_pending        = 1;
+        g_pending_pll    = pll_value;
+        g_pending_timing = operating_timing;
+        g_pending_freq   = new_freq_hz;
         return;
     }
+    g_pending = 0;
 
     /* 1. Power up the PLL (preserve the other DEV_INIT2 bits). */
     mmio_write32(DEV_INIT2_ADDR,
@@ -173,5 +193,6 @@ void clock_test_reset(void)
     g_freq       = CPUFREQ_DEFAULT;
     g_boost      = 0;
     g_dma_active = 0;
+    g_pending    = 0;
 }
 #endif
