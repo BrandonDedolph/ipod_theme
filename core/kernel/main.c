@@ -1783,6 +1783,43 @@ static void load_bar(const char *title, int pct)
     lcd_present_fb(console_framebuffer());
 }
 
+/*
+ * Deferred progress bar.
+ *
+ * load_bar() is expensive: console_clear() is 76,800 pixel writes and
+ * lcd_present_fb() streams the whole 153,600-byte frame with IRQs masked. The
+ * queue builders called it every 64 songs, so picking a track out of Songs paid
+ * ~19 full-frame repaints — and since the queue build is now O(n) with a hash
+ * lookup and a struct copy per entry, the BAR was most of the wait. Reporting
+ * progress cost more than the work it was reporting on.
+ *
+ * So: stay silent until the job has actually run long enough to need feedback,
+ * then behave normally. A library that enqueues in 30 ms shows nothing; one slow
+ * enough to look hung still gets a bar.
+ */
+#define LOAD_BAR_DELAY_US 250000u
+
+static uint32_t g_load_bar_t0;
+static int      g_load_bar_shown;
+
+static void load_bar_begin(void)
+{
+    g_load_bar_t0    = mmio_read32(USEC_TIMER_ADDR);
+    g_load_bar_shown = 0;
+}
+
+static void load_bar_progress(const char *title, int pct)
+{
+    if (!g_load_bar_shown) {
+        if ((uint32_t)(mmio_read32(USEC_TIMER_ADDR) - g_load_bar_t0)
+            < LOAD_BAR_DELAY_US) {
+            return;
+        }
+        g_load_bar_shown = 1;                 /* crossed the threshold: show it */
+    }
+    load_bar(title, pct);
+}
+
 /* ---------------------------------------------------------------------------
  * Load-time lookup indexes
  *
@@ -2133,7 +2170,7 @@ static void library_play_song(fat32_t *fs, int songview_idx)
     if (songview_idx < 0 || songview_idx >= g_songview_n) return;
     uint16_t sel_song = g_songview[songview_idx];
 
-    load_bar("Loading Songs", 0);
+    load_bar_begin();
     /* Shuffle is the user's setting, not something picking a song turns off:
      * forcing it off here left the player un-shuffled for the rest of the
      * session while the UI kept showing the SHUF token. */
@@ -2141,7 +2178,7 @@ static void library_play_song(fat32_t *fs, int songview_idx)
     player_queue_begin();
     int start = 0, added = 0;
     for (int i = 0; i < g_songview_n; i++) {
-        if ((i & 63) == 0) load_bar("Loading Songs", i * 100 / g_songview_n);
+        if ((i & 255) == 0) load_bar_progress("Loading Songs", i * 100 / g_songview_n);
         lib_song_t *s = &g_songs[g_songview[i]];
         /* Record the start position BEFORE the resolved-check: a pick that the
          * index lists but the disk no longer has would otherwise leave start at
@@ -2163,7 +2200,6 @@ static void library_play_song(fat32_t *fs, int songview_idx)
         player_queue_add(&e);
         added++;
     }
-    load_bar("Loading Songs", 100);
     if (start >= added) start = (added > 0) ? added - 1 : 0;   /* nothing after it */
     player_queue_commit(start);
     hal_volume_set(g_volume);
@@ -2187,7 +2223,7 @@ static void shuffle_songs_play(fat32_t *fs)
     library_ensure(fs);
     if (g_songs_n == 0) return;
 
-    load_bar("Shuffling Songs", 0);
+    load_bar_begin();
 
     /* Shuffle ALL song indices (Fisher-Yates) — the WHOLE library, not a sample. */
     static uint16_t ord[LIB_MAX_SONGS];
@@ -2205,7 +2241,7 @@ static void shuffle_songs_play(fat32_t *fs)
     player_set_shuffle(0);                 /* already shuffled; play in order */
     player_queue_begin();
     for (int i = 0; i < ns; i++) {
-        if ((i & 63) == 0) load_bar("Shuffling Songs", i * 100 / ns);
+        if ((i & 255) == 0) load_bar_progress("Shuffling Songs", i * 100 / ns);
         lib_song_t *s = &g_songs[ord[i]];
         if (!s->file_clus) continue;       /* unresolved (missing on disk) — skip */
         browse_entry_t e;
@@ -2221,7 +2257,6 @@ static void shuffle_songs_play(fat32_t *fs)
         e.art_size = (ai >= 0) ? g_albums[ai].art_size : 0;
         player_queue_add(&e);
     }
-    load_bar("Shuffling Songs", 100);
     player_queue_commit(0);
     /* The queue is ALREADY shuffled, so it was committed in plain order — but
      * restore the user's setting now, or Shuffle stays off for everything played
