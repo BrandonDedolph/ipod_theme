@@ -459,6 +459,13 @@ static int            g_browse_n;
 static uint32_t g_cur_dir;
 static int      g_dir_depth;
 
+/* Bumped whenever a list's CONTENT is rebuilt or the screen stack moves. The
+ * partial-repaint path (list_repaint_partial) compares it, so it can never
+ * repaint two rows of a list that is no longer the one it last painted — the
+ * screen identity and row count alone can coincide (two genres with the same
+ * number of songs, reached faster than one throttled repaint window). */
+static uint32_t g_list_epoch;
+
 /* Browser view state (was local to the old browse loop). The album LIST (depth
  * 0) and a single album's TRACKLIST (depth 1) keep SEPARATE selections, so
  * backing out of an album returns the cursor to that album in the list rather
@@ -1419,6 +1426,7 @@ static const char *artist_key(const char *s)
  * appear here at all. */
 static void build_artists(void)
 {
+    g_list_epoch++;
     g_artists_n = 0;
     for (int i = 0; i < g_albums_n; i++) {
         char artist[NAME_MAX + 1], album[NAME_MAX + 1];
@@ -1463,6 +1471,7 @@ static void build_artists(void)
  * artist_key so the "The "/case-insensitive grouping matches the Artists menu. */
 static void albumview_build(const char *artist_filter)
 {
+    g_list_epoch++;
     g_albumview_n = 0;
     for (int i = 0; i < g_albums_n && g_albumview_n < LIB_MAX_ALBUMS; i++) {
         if (artist_filter && artist_filter[0]) {
@@ -2041,6 +2050,7 @@ static void library_ensure(fat32_t *fs)
 /* Populate g_songview with the songs to show (genre < 0 = all), title-ordered. */
 static void songview_build(int genre)
 {
+    g_list_epoch++;
     g_songview_n = 0;
     for (int i = 0; i < g_songs_n; i++) {
         int si = g_song_sorted[i];
@@ -2713,14 +2723,17 @@ typedef enum { SCR_MENU, SCR_MUSIC, SCR_ARTISTS, SCR_SONGS, SCR_GENRES,
 static screen_t g_scr[SCR_STACK_MAX];
 static int      g_scr_n;
 
-static void      scr_push(screen_t s) { if (g_scr_n < SCR_STACK_MAX) g_scr[g_scr_n++] = s; }
-static void      scr_pop(void)        { if (g_scr_n > 1) g_scr_n--; }
+static void      scr_push(screen_t s) { g_list_epoch++;
+                                        if (g_scr_n < SCR_STACK_MAX) g_scr[g_scr_n++] = s; }
+static void      scr_pop(void)        { g_list_epoch++;
+                                        if (g_scr_n > 1) g_scr_n--; }
 static screen_t  scr_cur(void)        { return g_scr[g_scr_n - 1]; }
 
 /* Read an album's tracklist (the folder at `dir_clus`) into g_browse. Only ever
  * called at depth 1 now — the album LIST is the index-driven g_albums. */
 static void browse_load(fat32_t *fs, uint32_t dir_clus)
 {
+    g_list_epoch++;
     g_cur_dir  = dir_clus;
     g_browse_n = 0;
     g_art_clus = 0;                      /* re-captured by browse_collect below */
@@ -2925,7 +2938,7 @@ static int list_view_current(list_view_t *v)
  * moved, a two-row repaint would leave the screen stale. */
 static struct {
     int      valid, scr, depth, sel, top, count, right_w;
-    uint32_t chrome;
+    uint32_t chrome, epoch;
 } g_lp;
 
 static uint32_t chrome_key(void)
@@ -2954,6 +2967,7 @@ static void list_paint_note(void)
     g_lp.top     = scroll_window(v.sel, v.count, v.visible);
     g_lp.right_w = v.right[0] ? text_width(v.right, FONT_SMALL) : 0;
     g_lp.chrome  = chrome_key();
+    g_lp.epoch   = g_list_epoch;
 }
 
 /* Repaint the current screen by redrawing ONLY what a selection move changed:
@@ -2965,6 +2979,7 @@ static int list_repaint_partial(void)
     list_view_t v;
     if (!g_lp.valid || !list_view_current(&v)) return 0;
     if (g_lp.scr != (int)scr_cur() || g_lp.depth != g_dir_depth) return 0;
+    if (g_lp.epoch != g_list_epoch)                              return 0;
     if (g_lp.count != v.count || g_lp.chrome != chrome_key())    return 0;
     if (v.sel == g_lp.sel)                                       return 0;
     int top = scroll_window(v.sel, v.count, v.visible);
