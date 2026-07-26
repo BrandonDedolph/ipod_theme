@@ -62,7 +62,9 @@ typedef struct {
  */
 #define FAT32_ENOENT   (-1)   /* no such entry                              */
 #define FAT32_EIO      (-2)   /* the block callback reported a read error   */
-#define FAT32_ECORRUPT (-3)   /* cluster chain is cyclic / impossibly long  */
+#define FAT32_ECORRUPT (-3)   /* cluster chain is cyclic / impossibly long,
+                               * or a geometry that cannot be trusted       */
+#define FAT32_EINVAL   (-4)   /* null/absurd argument                       */
 
 /*
  * Mount the FAT32 volume whose first sector is at 512-byte LBA
@@ -184,5 +186,30 @@ int32_t fat32_stream_read(fat32_stream_t *st, void *buf, uint32_t len);
  * Returns the number of bytes actually skipped (< n only at end-of-file).
  */
 uint32_t fat32_stream_skip(fat32_stream_t *st, uint32_t n);
+
+/*
+ * Resolve a file's FIRST CLUSTER to an absolute 512-byte LBA, plus how many
+ * consecutive sectors from it are safely addressable.
+ *
+ * THIS IS THE ONLY WRITE-ENABLING CALL IN A READ-ONLY DRIVER. It exists for
+ * kernel/config.c, which overwrites the data sectors of a pre-allocated file
+ * in place and touches no filesystem metadata; a wrong answer here is not a
+ * failed read, it is the user's music library destroyed. The implementation
+ * carries the full rationale — read it before changing it.
+ *
+ * On success returns 0, sets *lba to the absolute 512-byte LBA of the first
+ * sector of `first_clus`, and sets *max_sectors to the number of 512-byte
+ * sectors that are contiguous from there (exactly ONE cluster's worth — the
+ * chain is deliberately not followed, so a caller can never walk past this
+ * cluster into a different file).
+ *
+ * On ANY failure — null args, an unmounted/absurd geometry, a cluster number
+ * this volume cannot address, arithmetic that would overflow uint32, or a run
+ * that would leave the partition — returns negative AND writes 0 to both
+ * out-params, so a caller that ignores the return code still has no address.
+ * Never returns LBA 0.
+ */
+int fat32_file_lba(const fat32_t *fs, uint32_t first_clus,
+                   uint32_t *lba, uint32_t *max_sectors);
 
 #endif /* CORE_FS_FAT32_H */
