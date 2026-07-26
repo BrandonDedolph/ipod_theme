@@ -1,0 +1,280 @@
+# CI for the core firmware.
+#
+# WHY THIS FILE EXISTS. Before it, nothing built this repo except a developer's
+# own machine, and the suite reported "25/25 green" for a long stretch purely
+# from stale gcc-14 object files served up by `meson test --no-rebuild`. A real
+# rebuild failed. Two independent -Werror breaks had been sitting in the tree:
+# a set-but-unused variable in a host test, and gcc 15+'s
+# -Wunterminated-string-initialization firing on the ARM build. Both are the
+# kind of thing a from-scratch build catches on the first push and a stale
+# build directory hides forever.
+#
+# So the non-negotiable property here is: EVERY JOB BUILDS FROM NOTHING. No
+# cached build directories, no ccache, no `--no-rebuild`, no incremental
+# reuse. The Meson/Ninja artefacts are the thing most likely to lie, so they
+# are the thing we refuse to persist. (Package and Go-module caches are fine —
+# they are inputs, not outputs.)
+#
+# Jobs:
+#   firmware-pinned   exact, reproducible ARM toolchain — the reference build
+#   firmware-rolling  newest ARM toolchain — catches compiler-upgrade breaks
+#                     like the 14->16 one, which is what started all this
+#   sanitizers        the suite under ASan + UBSan (FAT32 and the codec
+#                     container parsers both eat untrusted disk bytes)
+#   cli               the Go host CLI: build, vet, test, gofmt
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A newer push to the same ref makes the older run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned ARM toolchain. Keep in step with .tool-versions — that file is the
+  # human-readable record, this is what CI actually installs.
+  ARM_TOOLCHAIN_VERSION: "14.2.rel1"
+  ARM_TOOLCHAIN_URL: "https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi.tar.xz"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # The reference build: one exact toolchain, pinned by version and URL, so
+  # a failure here is always about the code and never about what happened to
+  # be in a distro repository that morning.
+  # ---------------------------------------------------------------------
+  firmware-pinned:
+    name: firmware (pinned arm-none-eabi toolchain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build python3 libsdl2-dev binutils
+
+      - name: Install pinned ARM toolchain
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/arm-toolchain"
+          curl -fsSL "$ARM_TOOLCHAIN_URL" -o /tmp/arm-toolchain.tar.xz
+          tar -xf /tmp/arm-toolchain.tar.xz -C "$HOME/arm-toolchain" \
+              --strip-components=1
+          echo "$HOME/arm-toolchain/bin" >> "$GITHUB_PATH"
+
+      - name: Record the toolchain actually in use
+        run: |
+          arm-none-eabi-gcc --version | head -1
+          gcc --version | head -1
+          meson --version
+          python3 --version
+
+      # Belt and braces: the checkout is clean, but a stray build directory
+      # would silently turn this into an incremental build, which is exactly
+      # the failure mode this workflow exists to prevent.
+      - name: Assert no cached build directories
+        run: |
+          if find core -maxdepth 1 -type d -name 'build*' | grep -q .; then
+            echo "a build directory was checked out — CI must build from scratch" >&2
+            find core -maxdepth 1 -type d -name 'build*' >&2
+            exit 1
+          fi
+
+      - name: Build host tests from scratch
+        working-directory: core
+        run: make sim
+
+      - name: Run the test suite
+        working-directory: core
+        # NOT --no-rebuild: the point is that the binaries under test were
+        # produced by the build we just did.
+        run: meson test -C build-sim --print-errorlogs
+
+      - name: Build the firmware from scratch
+        working-directory: core
+        # This also runs the post-link size/RAM budget gate
+        # (tests/scripts/check_size.sh), which fails the build past budget.
+        run: make hw
+
+      - name: Verify the linked image
+        working-directory: core
+        run: make verify-hw
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-logs-pinned
+          path: |
+            core/build-sim/meson-logs/
+            core/build-hw/meson-logs/
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------
+  # The newest toolchain available. Developers here run Arch, where
+  # arm-none-eabi-gcc rolls forward on its own — which is how the 14 -> 16
+  # jump silently broke the baseline in the first place. Running the hw build
+  # against the rolling toolchain means the next such break shows up as a red
+  # CI run instead of as a mysteriously failing local build weeks later.
+  # ---------------------------------------------------------------------
+  firmware-rolling:
+    name: firmware (rolling arm-none-eabi, Arch)
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install toolchain
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git meson ninja python sdl2 \
+            arm-none-eabi-gcc arm-none-eabi-binutils arm-none-eabi-newlib
+
+      - uses: actions/checkout@v4
+
+      - name: Record the toolchain actually in use
+        run: |
+          arm-none-eabi-gcc --version | head -1
+          gcc --version | head -1
+          meson --version
+
+      - name: Build host tests from scratch
+        working-directory: core
+        run: make sim
+
+      - name: Run the test suite
+        working-directory: core
+        run: meson test -C build-sim --print-errorlogs
+
+      - name: Build the firmware from scratch
+        working-directory: core
+        run: make hw
+
+      - name: Verify the linked image
+        working-directory: core
+        run: make verify-hw
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-logs-rolling
+          path: |
+            core/build-sim/meson-logs/
+            core/build-hw/meson-logs/
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------
+  # AddressSanitizer + UndefinedBehaviorSanitizer.
+  #
+  # PLAN.md promises these in two places and core/meson.build set no
+  # b_sanitize at all. They matter here more than in a typical project: the
+  # FAT32 reader and the codec container parsers consume whatever is on a
+  # user's disk — a half-copied volume, a truncated FLAC, a card formatted by
+  # something else — and until recently exactly one test in the tree fed any
+  # of them malformed input.
+  #
+  # -O0 and no LTO on purpose: at -Os with LTO the compiler is entitled to
+  # delete the dead store past the end of an array that ASan exists to
+  # report.
+  # ---------------------------------------------------------------------
+  sanitizers:
+    name: host tests (ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build python3 libsdl2-dev
+
+      - name: Configure a fresh sanitizer build
+        working-directory: core
+        run: |
+          meson setup build-asan -Dtarget=sim \
+            -Db_sanitize=address,undefined \
+            -Doptimization=0 \
+            -Db_lto=false
+
+      - name: Build
+        working-directory: core
+        run: ninja -C build-asan
+
+      - name: Run the suite under the sanitizers
+        working-directory: core
+        env:
+          # halt_on_error=1: a sanitizer report must fail the job, not scroll
+          # past in a test that goes on to print PASS.
+          ASAN_OPTIONS: "detect_leaks=1:abort_on_error=0:halt_on_error=1:strict_string_checks=1:detect_stack_use_after_return=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: meson test -C build-asan --print-errorlogs
+
+      - name: Upload sanitizer logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-logs-asan
+          path: core/build-asan/meson-logs/
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------
+  # The Go host CLI (core/cli): `core firmware pack` builds the .ipod
+  # transport image, so a break here means no way to get a build onto the
+  # device. gofmt is checked because a formatting drift in a repo with no CI
+  # is invisible until it collides with someone else's edit.
+  # ---------------------------------------------------------------------
+  cli:
+    name: Go CLI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core/cli
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Kept in step with .tool-versions and core/cli/go.mod.
+          go-version: "1.22.10"
+          cache-dependency-path: core/cli/go.sum
+
+      # TEMPORARILY NON-BLOCKING. Nine files under core/cli are not gofmt-clean
+      # today — the const-block comment alignment gofmt produces changed between
+      # Go releases, and these were written by an older one:
+      #
+      #   internal/artistart/fetch.go     internal/tagcache/decode.go
+      #   internal/cli/tagcache.go        internal/tagcache/encode.go
+      #   internal/ipod/detect.go         internal/tagcache/format.go
+      #   internal/tagcache/scan.go       internal/tagcache/scan_test.go
+      #   internal/tagcache/roundtrip_test.go
+      #
+      # The whole diff is whitespace. Fixing it is one command —
+      # `cd core/cli && gofmt -w ./...` — but it belongs in a commit of its own
+      # rather than buried in a CI change, and a job that is red on arrival
+      # gates nothing: build/vet/test below are all green TODAY and are what
+      # would actually catch a regression. Run that command, then delete this
+      # comment and the continue-on-error line so drift starts failing again.
+      - name: gofmt
+        continue-on-error: true
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...

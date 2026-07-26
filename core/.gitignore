@@ -1,7 +1,13 @@
-# Meson build directories
-build-hw/
-build-sim/
-build/
+# Meson build directories.
+#
+# The glob is the load-bearing line: meson drops a .gitignore inside every
+# build directory it creates, so ad-hoc ones (build-check/, build-hw-check/,
+# build-asan/, a bisect scratch dir) stayed untracked only by that accident.
+# If a directory is ever created some other way — a partial `meson setup`, a
+# manual mkdir, an unpacked artifact — the self-ignore is not there and the
+# whole tree is suddenly staged. Name the pattern here instead of relying on
+# the build system to hide its own output.
+build*/
 
 # Object files / artifacts
 *.o

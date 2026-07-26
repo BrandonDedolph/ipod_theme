@@ -22,7 +22,7 @@ Rockbox theme, patch, or plugin, and it contains no copied Rockbox code.
 The whole bare-metal stack is proven end-to-end on an actual iPod 5.5G:
 boot + memory remap → clock/PLL → timer/IRQ → LCD (BCM framebuffer
 present) → I²C/WM8758B/I²S first sound → DMA playback → ATA PIO reader →
-FAT32 → streaming FLAC/MP3 decode → audio out the headphone jack.
+FAT32 → streaming FLAC decode → audio out the headphone jack.
 
 <p align="center">
   <img src="docs/screens/demo.gif" alt="core UI in motion — main menu to Now Playing" width="420">
@@ -47,10 +47,15 @@ See the [**Screens**](#screens) gallery below for a full tour.
   kernel, a static-arena allocator, and our own `mem.c` back the
   freestanding decoders; integer division and soft-float come from the
   compiler runtime (`libgcc`), never libc.
-- **Real audio.** `dr_flac` and `dr_mp3` are compiled freestanding
+- **Real audio.** `dr_flac` is compiled freestanding
   (`-DCORE_FREESTANDING`) and fed by a read-ahead disk source into an
   SPSC PCM ring drained by the DMA-completion ISR. Streaming, not
-  preload — a full-length track plays off the disk.
+  preload — a full-length track plays off the disk. **The device is
+  FLAC-only today:** `dr_mp3` is built and linked, but MP3 is disabled
+  (`CORE_ENABLE_MP3 0` in `core/kernel/main.c`) and `.mp3` files are
+  hidden from the browser entirely — its float synthesis filter can't
+  hit real time on this FPU-less CPU, so the ring starves and playback
+  stutters. Re-enabling it needs a fixed-point or second-core decoder.
 - **Real type.** `core/ui/text.c` is a libc-free, gamma-correct
   antialiased text renderer that draws pre-rasterized Nunito glyph
   atlases straight into the RGB565 framebuffer — no FreeType, no malloc,
@@ -209,7 +214,7 @@ of the project is how little the hardware gives you.
 
 Working on real hardware today: boot and bring-up, LCD present, click-wheel
 input, backlight, WM8758B first sound, DMA continuous playback, ATA + FAT32
-read, and **streaming FLAC/MP3 playback off the iPod's own disk**. The
+read, and **streaming FLAC playback off the iPod's own disk**. The
 menu UI and Now Playing screens (embedded album art, progress) render on
 device via the freestanding text renderer. There is no serial cable in the
 loop — on-device state is confirmed through an on-screen framebuffer console.
@@ -235,9 +240,26 @@ make hw            # → build-hw/core.elf, build-hw/core.bin
 make ipod          # → build-hw/core.ipod (transport-wrapped image)
 
 # Host build + unit tests (freestanding drivers/codecs, MMIO golden traces)
-make sim           # configures + builds the host target
+make sim           # configures + builds the host TEST target — see below
 meson test -C build-sim
+
+# The same tests under AddressSanitizer + UndefinedBehaviorSanitizer. The
+# FAT32 reader and the codec container parsers consume whatever is on a
+# user's disk, so this is the build that matters for them.
+meson setup build-asan -Dtarget=sim \
+    -Db_sanitize=address,undefined -Doptimization=0 -Db_lto=false
+meson test -C build-asan
 ```
+
+> **`make sim` builds the tests, not a simulator.** The name is aspirational:
+> the sim target compiles `codecs/` and `tests/` only. `core/hal/sim/sim_hal.c`
+> exists and builds into a static library, but **no executable links it** —
+> there is no runnable SDL2 emulator you can point at a music folder. What
+> `make sim` gives you is the host test suite: the same freestanding driver,
+> codec and text-renderer sources the device links, exercised against a
+> recording mock MMIO bus. That is genuinely useful — it is the only automated
+> check of the hardware register grammar — but it is not a simulator, and the
+> device remains the only place the UI can be seen.
 
 The host (`sim`) target compiles the same freestanding driver, codec, and
 text-renderer sources the device links, plus the MMIO golden-trace tests

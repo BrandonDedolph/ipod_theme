@@ -34,9 +34,18 @@ typedef struct {
 
 static read_entry g_reads[MMIO_READMAP_CAP];
 
+/* Post-access hook; see mmio_mock.h. NULL when unused, which is the norm. */
+static mmio_mock_hook_fn g_hook;
+
+void mmio_mock_set_hook(mmio_mock_hook_fn fn)
+{
+    g_hook = fn;
+}
+
 void mmio_mock_reset(void)
 {
     g_log_len = 0;
+    g_hook    = NULL;
     for (size_t i = 0; i < MMIO_READMAP_CAP; i++) {
         g_reads[i].in_use = 0;
     }
@@ -107,6 +116,9 @@ static void record(mmio_op op, int width, uint32_t addr, uint32_t value)
     g_log[g_log_len].addr  = addr;
     g_log[g_log_len].value = value;
     g_log_len++;
+    if (g_hook != NULL) {
+        g_hook(&g_log[g_log_len - 1]);
+    }
 }
 
 static uint32_t serve_read(uint32_t addr)

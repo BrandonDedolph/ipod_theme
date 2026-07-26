@@ -28,7 +28,10 @@ Usage:
     coreart.py --thumb <folder> [art_size] [thm_size]  # folder.art + folder.thm in <folder>
     coreart.py --batch <root>  [art_size] [thm_size]   # every subfolder -> folder.art + .thm
 
-Defaults: art_size = 120, thm_size = 24.
+Defaults: art_size = 120, thm_size = 28. (thm_size is 28 because it must match
+the firmware's ARTCACHE_DIM exactly — at the exact size the device blits the
+chip with no on-device resample. This line used to say 24, contradicting the
+THM_SIZE_DEFAULT constant twelve lines below it; the constant was right.)
 """
 import sys, subprocess, struct, glob, os
 
@@ -40,14 +43,33 @@ THM_SIZE_DEFAULT = 28   # matches firmware ARTCACHE_DIM: exact-size = no on-devi
 
 
 def extract(flac_path, size):
-    raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", flac_path, "-an", "-map", "0:v:0",
-         "-vf", f"scale={size}:{size}:flags=lanczos",
-         "-pix_fmt", "rgb565le", "-f", "rawvideo", "-"],
-        capture_output=True).stdout
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", flac_path, "-an", "-map", "0:v:0",
+             "-vf", f"scale={size}:{size}:flags=lanczos",
+             "-pix_fmt", "rgb565le", "-f", "rawvideo", "-"],
+            capture_output=True)
+    except FileNotFoundError:
+        raise SystemExit("ffmpeg not found on PATH — it does the decode, "
+                         "scale and RGB565 conversion here.")
+
+    # ffmpeg's exit status was previously ignored entirely: only the output
+    # LENGTH was checked. That conflates every distinct failure (unreadable
+    # file, no embedded PICTURE block, a bad filter string, ffmpeg killed) into
+    # one "no embedded art?" guess, and would have accepted a truncated stream
+    # outright had it happened to be the right length. Report what actually
+    # went wrong, including ffmpeg's own message.
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(f"{flac_path}: ffmpeg exited {proc.returncode}"
+                           + (f"\n{err}" if err else ""))
+
+    raw = proc.stdout
     if len(raw) != size * size * 2:
+        err = proc.stderr.decode("utf-8", "replace").strip()
         raise RuntimeError(f"{flac_path}: got {len(raw)} bytes, "
-                           f"expected {size*size*2} (no embedded art?)")
+                           f"expected {size*size*2} (no embedded art?)"
+                           + (f"\n{err}" if err else ""))
     return raw
 
 

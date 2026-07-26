@@ -42,7 +42,9 @@ sim: $(BUILD_SIM)/build.ninja
 # fresh `make hw`. The MMIO trace tests run under `meson test`.
 verify-hw: hw
 	sh tests/scripts/check_hw_layout.sh $(BUILD_HW)/core.elf
+	sh tests/scripts/check_size.sh $(BUILD_HW)/core.elf
 	python3 tests/scripts/check_hw_consistency.py
+	python3 tests/scripts/check_name_hash_parity.py
 
 $(BUILD_HW)/build.ninja:
 	meson setup $(BUILD_HW) --cross-file cross/arm-none-eabi.txt -Dtarget=hw

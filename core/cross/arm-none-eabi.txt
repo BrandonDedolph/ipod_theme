@@ -2,7 +2,24 @@
 #
 # The PortalPlayer PP5022 SoC has dual ARM7TDMI cores running at up to
 # 80 MHz. We target ARMv4T (the ARM7TDMI ISA). Toolchain is the standard
-# arm-none-eabi-gcc bundle (gcc 14 on Arch's official package).
+# arm-none-eabi-gcc bundle.
+#
+# TOOLCHAIN VERSION. This comment used to say "gcc 14 on Arch's official
+# package", and that had gone stale — the package had rolled forward to
+# 16.1.0, gcc 15 having meanwhile added -Wunterminated-string-initialization,
+# and the -Werror hw build stopped compiling. That is exactly the break the
+# stale comment made harder to diagnose, so the pin now lives somewhere that
+# is actually checked:
+#
+#   .tool-versions               the human-readable record and the reasoning
+#   .github/workflows/ci.yml     ARM_TOOLCHAIN_VERSION — the pinned reference
+#                                build (Arm GNU Toolchain 14.2.rel1), plus a
+#                                second job on the rolling Arch toolchain so
+#                                the next upgrade breaks CI, not a laptop
+#
+# Floor is gcc 14; there is deliberately no ceiling. core/meson.build probes
+# for newer-compiler flags with cc.get_supported_arguments() instead of
+# passing them blind, so both ends of that range build.
 #
 # Usage:
 #   meson setup build-hw --cross-file cross/arm-none-eabi.txt -Dtarget=hw
