@@ -18,8 +18,18 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FONTS = "/home/brando/Projects/ipod_theme/tools/fonts-src"
+# Repo-relative, not an absolute path into one person's home directory (which
+# is what this was, and which meant the script only ran on one machine).
+# CORE_FONTS_DIR overrides it if the faces ever live somewhere else.
+REPO = os.path.dirname(os.path.dirname(HERE))
+FONTS = os.environ.get("CORE_FONTS_DIR", os.path.join(REPO, "tools", "fonts-src"))
 ART = os.path.join(HERE, "art")
+
+if not os.path.isdir(FONTS):
+    raise SystemExit(
+        f"font directory not found: {FONTS}\n"
+        f"Expected the Nunito faces in <repo>/tools/fonts-src; set "
+        f"CORE_FONTS_DIR to point somewhere else.")
 
 W, H = 320, 240
 SCALE = 3          # PNG upscale (NEAREST)

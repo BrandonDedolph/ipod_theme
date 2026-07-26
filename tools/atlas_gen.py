@@ -6,6 +6,18 @@ literal; see core/apps/ui/atlas.h for the C-side type definitions.
 
 Run via tools/atlas_gen.sh which sets up the venv with Pillow.
 
+REQUIRES PYTHON 3.12+. The glyph-label f-string below embeds a backslash inside
+its expression part, which only became legal in 3.12 (PEP 701); on 3.11 this
+file is a SyntaxError at import, before any argument is parsed, so the failure
+looks like the tool is broken rather than the interpreter being too old. There
+is an explicit version check below so the error says which it is.
+
+All file writes here are explicitly UTF-8. The generated header carries the
+literal glyph characters in its comments (smart quotes, chevrons, the middle
+dot), so writing with the platform default encoding meant this tool died with a
+UnicodeEncodeError under LC_ALL=C — which is exactly the environment a CI
+container or a cron job runs in.
+
 Usage:
     atlas_gen.py <ttf-path> <pixel-size> <c-symbol-name> <output.h>
 
@@ -16,7 +28,21 @@ Example:
 import argparse
 import os
 import sys
+
+if sys.version_info < (3, 12):
+    raise SystemExit(
+        f"atlas_gen.py needs Python 3.12+ (found "
+        f"{sys.version_info.major}.{sys.version_info.minor}): it uses a "
+        f"backslash inside an f-string expression, legal only since PEP 701.")
+
 from PIL import Image, ImageDraw, ImageFont
+
+# The generated headers declare `uint16_t data_offset`, so the concatenated
+# glyph bitmap cannot exceed 64 KiB — past that the offsets wrap and every
+# glyph after the wrap point renders as a slice of some other glyph's bitmap.
+# Nothing checked this; a large face at a large pixel size would have produced
+# a header that compiles cleanly and draws garbage.
+DATA_OFFSET_MAX = 0xFFFF
 
 PRINTABLE = range(0x20, 0x7F)  # 0x20..0x7E inclusive — 95 glyphs
 
@@ -73,7 +99,7 @@ def write_glyphmap(out_dir: str) -> None:
     out.append(f"#define ATLAS_CPMAP_N {len(rows)}")
     out.append("")
     path = os.path.join(out_dir, "glyphmap.h")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(out))
     sys.stderr.write(f"wrote {path}\n")
 
@@ -117,6 +143,16 @@ def render_atlas(ttf_path: str, px_size: int, symbol: str) -> str:
         add_glyph(chr(codepoint))
     for _cp, ch in EXTRAS:
         add_glyph(ch)
+
+    # Every data_offset must fit the uint16_t field it is generated into.
+    if len(glyph_data) > DATA_OFFSET_MAX:
+        raise SystemExit(
+            f"{symbol}: glyph bitmap data is {len(glyph_data)} bytes, past the "
+            f"{DATA_OFFSET_MAX} the generated `uint16_t data_offset` field can "
+            f"address. Offsets past that point would wrap and every later "
+            f"glyph would draw a slice of the wrong bitmap — silently, at "
+            f"runtime. Use a smaller pixel size, trim EXTRAS, or widen "
+            f"data_offset in core/ui/atlas.h (and the generator).")
 
     # Output as a C header.
     out = []
@@ -176,7 +212,7 @@ def main() -> int:
     contents = render_atlas(args.ttf, args.px_size, args.symbol)
     out_dir = os.path.dirname(args.output) or "."
     os.makedirs(out_dir, exist_ok=True)
-    with open(args.output, "w") as f:
+    with open(args.output, "w", encoding="utf-8") as f:
         f.write(contents)
     sys.stderr.write(f"wrote {args.output}\n")
     write_glyphmap(out_dir)                 # font-independent; rewritten each run

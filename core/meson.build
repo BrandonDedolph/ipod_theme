@@ -25,10 +25,33 @@ project(
 )
 
 target = get_option('target')
+cc = meson.get_compiler('c')
+
+# Warning flags that only exist on newer compilers go through
+# get_supported_arguments(), which probes the ACTUAL compiler in use. This
+# matters for -Wno-error= in particular: passing -Wno-error=<name-the-compiler-
+# does-not-know> makes gcc emit "'-Werror=' argument ... is not valid", and
+# under -Werror that is itself a hard error — so an unguarded flag added for
+# gcc 16 would break the build on gcc 14. The toolchain floor lives in
+# .tool-versions; this keeps older-but-supported toolchains working anyway.
+optional_c_args = cc.get_supported_arguments([
+  # gcc 16 added -Wunterminated-string-initialization, which fires on the
+  # deliberate `static const char hex[16] = "0123456789ABCDEF"` lookup tables
+  # in hal/hw/uart.c and hal/hw/lcd.c (exactly-sized char arrays, never used
+  # as C strings) and broke the -Werror hw build outright on the 14->16
+  # upgrade. The correct fix is __attribute__((nonstring)) on those two
+  # arrays, which lands separately in the files that own them. Until then
+  # this DEMOTES the diagnostic to a warning rather than silencing it
+  # (-Wno-error=, not -Wno-), so the build goes through and the arrays stay
+  # visible. REMOVE THIS once uart.c/lcd.c carry the attribute.
+  # tests/meson.build passes the stronger per-target -Wno- form for the same
+  # two files.
+  '-Wno-error=unterminated-string-initialization',
+])
 
 # Common warning/safety flags
 # (warning_level=3 already implies -Wall -Wextra -Wpedantic; we add specifics.)
-common_c_args = [
+common_c_args = optional_c_args + [
   '-ffunction-sections',
   '-fdata-sections',
   '-Wundef',
@@ -39,17 +62,8 @@ common_c_args = [
   # is no longer global. The vendored codec blocks below still list it in their
   # own suppression sets, which is where it belongs.
   #
-  # gcc 16 added -Wunterminated-string-initialization, which fires on the
-  # deliberate `static const char hex[16] = "0123456789ABCDEF"` lookup tables in
-  # hal/hw/uart.c and hal/hw/lcd.c (exactly-sized char arrays, never used as C
-  # strings) and broke the -Werror hw build outright on the 14->16 upgrade. The
-  # correct fix is __attribute__((nonstring)) on those two arrays, which lands
-  # separately in the files that own them. Until then this DEMOTES the
-  # diagnostic to a warning rather than silencing it (-Wno-error=, not -Wno-),
-  # so the build goes through and the arrays stay visible. REMOVE THIS once
-  # uart.c/lcd.c carry the attribute. tests/meson.build passes the stronger
-  # per-target -Wno- form for the same two files.
-  '-Wno-error=unterminated-string-initialization',
+  # Version-dependent suppressions live in optional_c_args above, which probes
+  # the compiler before adding them.
 ]
 
 common_link_args = [
@@ -72,8 +86,7 @@ if target == 'hw'
     # dirent/sector scratch) and well below the available stack, so it catches
     # a new multi-KB local array at compile time. Raise it only with a note
     # about where the space came from.
-    '-Wframe-larger-than=1024',
-  ]
+  ] + cc.get_supported_arguments(['-Wframe-larger-than=1024'])
   add_project_arguments(common_c_args, language: 'c')
   add_project_link_arguments(common_link_args, language: 'c')
   message('Configured for hardware target (ARM, iPod 5G/5.5G)')
