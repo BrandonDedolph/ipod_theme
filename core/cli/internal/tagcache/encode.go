@@ -16,12 +16,13 @@ import (
 // Tag values that compare case-insensitively equal share a uniq slot
 // (e.g. "Aphex Twin" and "aphex twin" collapse to one artist). The
 // canonical spelling is deterministic: after sorting songs by title,
-// the first spelling encountered in title order wins. This differs
-// from the firmware's `tagcache.c::build_unique_index`, where the
-// surviving spelling depends on the C qsort's (unstable) ordering —
-// the asymmetry vanishes in normal use because the C reader will
-// consume uniq strings from the .tcdb verbatim instead of re-deriving
-// them.
+// the first spelling encountered in title order wins.
+//
+// (An earlier version of this comment contrasted the tie-break with
+// `tagcache.c::build_unique_index` on the firmware side. There is no
+// such file and no such function: the device builds its lists from
+// CIDX in core/kernel/main.c. Nothing on the device re-derives these
+// uniq tables, so the only consumer of this ordering is Read.)
 func Build(songs []SongInfo) *Model {
 	// Sort by title (case-insensitive) up front. The format docstring
 	// promises the on-disk song array is title-sorted; doing it here
@@ -77,8 +78,11 @@ type Model struct {
 	// Optional per-artist photo bytes (JPEG, fetched offline by
 	// `core tagcache build --fetch-art`). Length is either 0 (none
 	// fetched at all — common path) or len(UniqArtists). Per-entry
-	// nil/empty means "no photo for this artist", and is also fine
-	// — the firmware falls back to the artist's first album art.
+	// nil/empty means "no photo for this artist".
+	//
+	// These images are third-party works under third-party terms; see
+	// the licensing notes in internal/artistart. They are for local use
+	// and must not be bundled into a release artifact.
 	ArtistArt [][]byte
 }
 

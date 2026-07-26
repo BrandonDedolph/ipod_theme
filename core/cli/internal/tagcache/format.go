@@ -1,17 +1,30 @@
-// Package tagcache builds and reads the binary on-disk music index
-// (the .tcdb file) that the firmware mmaps at startup.
+// Package tagcache builds and reads TCDB, a binary music-index format.
 //
-// On real hardware the iPod can't afford a scan-at-startup pass — even
-// a small library on a USB disk takes seconds-to-minutes to walk and
-// re-parse every tag. Instead, the user runs `core tagcache build`
-// once on the host (after re-syncing music), and the firmware then
-// loads the precomputed binary at boot.
+// STATUS: TCDB is a host-side format that the firmware does not read.
+//
+// The index the device actually loads is CIDX (`Music/CORELIB.IDX`),
+// written by tools/build_index.py and parsed by
+// core/kernel/main.c:library_load_index. The two formats have nothing in
+// common: CIDX is magic "CIDX", a 12-byte header and fixed 256-byte
+// records keyed by FNV-1a hashes of normalized folder/file names; TCDB
+// is magic "TCDB", a 156-byte header and variable-length sections keyed
+// by host absolute path. Copying a .tcdb onto an iPod does nothing —
+// the firmware ignores it and falls back to a directory scan.
+//
+// This package is kept as host-side tooling and as a worked design for
+// a richer index than CIDX (deduped string table, uniq tables with
+// per-dimension group lists, embedded album art, per-artist photos).
+// See README.md in this directory for the full comparison and for what
+// it would take to make the two formats meet.
+//
+// Nothing here is load-bearing for a build or a flash. Do not describe
+// it as something the device consumes.
 //
 // File layout (all integers little-endian, the iPod ARM is LE):
 //
-//	+-------- Header (132 bytes) --------+
+//	+-------- Header (156 bytes) --------+
 //	|  magic[4]      = "TCDB"             |
-//	|  version u32   = 1                  |
+//	|  version u32   = 2                  |
 //	|  song_count u32                     |
 //	|  n_artists u32   (uniq)             |
 //	|  n_albums u32                       |
@@ -28,6 +41,9 @@
 //	|  composer_groups_off u64            |
 //	|  strings_off, strings_len u64       |
 //	|  art_off, art_len u64               |
+//	|  artist_art_idx_off u64      (v2)   |
+//	|  artist_art_blob_off u64     (v2)   |
+//	|  artist_art_blob_len u64     (v2)   |
 //	+-------- Song records ---------------+
 //	|  song_count * SongRecord (40 B ea)  |
 //	+-------- Uniq tables ---------------+
@@ -64,15 +80,20 @@
 // the global song order, so the firmware can present the same drilldown
 // rows whether it reads from the binary cache or scan-at-startup.
 //
-// Case-insensitive ordering is ASCII-only — we use strings.ToLower /
-// strcasecmp on the C side, NOT a Unicode collator. Two strings that
-// differ only by Unicode-case (e.g. Turkish dotless i) are treated as
-// distinct. For an iPod-class music library this hasn't surfaced, but
-// don't promise Unicode-correct collation here.
+// Songs are keyed by their host absolute path (SongInfo.Path). That is
+// one of several reasons this format could not be handed to the device
+// as-is: the firmware locates files purely by FNV-1a hashes of
+// normalized folder and file names, and never sees a host path.
+//
+// Case-insensitive ordering is ASCII-only — we use strings.ToLower, NOT
+// a Unicode collator. Two strings that differ only by Unicode-case
+// (e.g. Turkish dotless i) are treated as distinct. For an iPod-class
+// music library this hasn't surfaced, but don't promise Unicode-correct
+// collation here.
 //
 // Versioning: bump `Version` whenever the binary layout changes in a
-// non-additive way. Readers must reject mismatched versions rather than
-// try to interpret them.
+// non-additive way. Read rejects mismatched versions rather than trying
+// to interpret them.
 package tagcache
 
 import "encoding/binary"
@@ -81,11 +102,13 @@ import "encoding/binary"
 var Magic = [4]byte{'T', 'C', 'D', 'B'}
 
 // Version is the on-disk format version. Bumped on incompatible layout
-// changes; the firmware reader refuses to load mismatched versions.
+// changes; Read refuses to load mismatched versions. (There is no
+// firmware-side reader — see the package status note.)
 //
-// v2 added the artist-art index + blob (fetched from MusicBrainz +
-// Wikidata + Commons by `core tagcache build --fetch-art`). v1 readers
-// can't safely interpret v2 because the header grew.
+// v2 added the artist-art index + blob (fetched from Deezer /
+// MusicBrainz / Wikidata / Commons by `core tagcache build
+// --fetch-art`). v1 readers can't safely interpret v2 because the
+// header grew from 132 to 156 bytes; nothing writes v1 any more.
 const Version uint32 = 2
 
 // HeaderSize is the byte size of the fixed header. The file's first
