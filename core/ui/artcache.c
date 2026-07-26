@@ -2,17 +2,27 @@
 /*
  * core/ui/artcache.c — incremental album-art thumbnail cache.
  *
- * State machine per slot: EMPTY → QUEUED → (LOADED | FAILED). artcache_pump()
- * advances exactly ONE QUEUED slot per call, so the disk reads a cover load
- * needs are amortised over many main-loop passes and never stall the audio
- * decode/DMA loop the way a synchronous load during list scroll did.
+ * Two tiers (see artcache.h for the why): a 12-byte DIRECTORY entry per album
+ * that never moves, and ARTCACHE_WAYS decoded-pixel entries that come and go.
+ * A way is EMPTY (key < 0) → QUEUED → LOADED; a load that fails frees the way
+ * and records the album in a "no art" bitmap so it is never retried.
+ * artcache_pump() advances exactly ONE QUEUED way per call, so the disk reads
+ * a cover load needs are amortised over many main-loop passes and never stall
+ * the audio decode/DMA loop the way a synchronous load during list scroll did.
  *
- * The load path mirrors player.c's load_folder_art(): enumerate the album
- * directory for a CoreArt sidecar, read it into a bounded module-static scratch
- * buffer, validate the "CART" magic + dimensions, then hand the pixels to
- * thumb_downscale_rgb565() to shrink into the slot's 22x22 box. folder.thm
- * (24x24) is preferred over folder.art (up to 120x120) when both exist — either
- * downscales correctly, but the smaller source is a cheaper read.
+ * Eviction is least-recently-drawn. artcache_get() is called for every visible
+ * row on every frame, so stamping a way on each call makes the newest stamps
+ * exactly the on-screen window — a visible row can never be the victim, which
+ * a "distance from a focus index" rule cannot promise once the window is
+ * bigger than the gaps between resident albums. Same stamp orders pump: the
+ * row you are looking at resolves before the row you scrolled past.
+ *
+ * The load path reads a pre-indexed CoreArt sidecar into a bounded module-
+ * static scratch buffer, validates the "CART" magic + dimensions, then hands
+ * the pixels to thumb.c to shrink into the way's ARTCACHE_DIM box. folder.thm
+ * (baked at exactly 28x28) is preferred over folder.art (up to 120x120) when
+ * both exist — either works, but the smaller source is both a cheaper read and
+ * a 1:1 copy instead of a resample.
  *
  * Freestanding: no libc/libm/malloc, no allocation, integer only.
  */
@@ -20,80 +30,183 @@
 #include "artcache.h"
 #include "thumb.h"
 
-/* CoreArt sidecar layout (see tools/coreart.py, player.c load_folder_art):
- * "CART"(4) + u16 version + u16 width + u16 height + u16 reserved, then
- * width*height RGB565 pixels. The scratch buffer is sized for the largest
- * cover we accept (120x120), which comfortably holds a 24x24 folder.thm too. */
-#define ART_HDR_LEN   12
-#define ART_MAX_DIM   120
-#define ART_RAW_MAX   (ART_HDR_LEN + ART_MAX_DIM * ART_MAX_DIM * 2)
-
 enum {
-    SLOT_EMPTY = 0,
-    SLOT_QUEUED,
-    SLOT_LOADED,
-    SLOT_FAILED,
+    WAY_EMPTY = 0,
+    WAY_QUEUED,
+    WAY_LOADED,
 };
 
+/* Where one album's cover lives on disk. Sizes are u16 because the largest
+ * sidecar we will read is ARTCACHE_SCRATCH_SZ (28,812) — queue() rejects
+ * anything bigger, so nothing is silently truncated. */
 typedef struct {
-    uint8_t  state;
-    uint32_t thm_clus, thm_size;               /* pre-indexed folder.thm (24x24) */
-    uint32_t art_clus, art_size;               /* pre-indexed folder.art fallback */
-    uint16_t px[ARTCACHE_DIM * ARTCACHE_DIM];  /* 22x22 RGB565 (valid iff LOADED) */
-} slot_t;
+    uint32_t thm_clus, art_clus;
+    uint16_t thm_size, art_size;
+} album_t;
 
-static slot_t   g_slot[ARTCACHE_SLOTS];
-static uint8_t  g_scratch[ART_RAW_MAX];
+typedef struct {
+    uint32_t stamp;                            /* last artcache_get, 0 if never */
+    int16_t  key;                              /* album index, or -1 if unused  */
+    uint8_t  state;
+    uint16_t px[ARTCACHE_DIM * ARTCACHE_DIM];  /* 28x28 RGB565 (valid iff LOADED) */
+} way_t;
+
+/* ~28.3 KB resident, versus ~198.5 KB for the old album-indexed pixel array:
+ *   directory  256 * 12                    =  3,072 B
+ *   no-art bitmap                          =     32 B
+ *   ways       16 * (28*28*2 + 8)          = 25,216 B
+ * Scratch adds ARTCACHE_SCRATCH_SZ (28,812 B) on top, shareable via
+ * artcache_scratch() so the rest of the UI need not carry a second copy. */
+static album_t  g_album[ARTCACHE_SLOTS];
+static uint8_t  g_noart[(ARTCACHE_SLOTS + 7) / 8];
+static way_t    g_way[ARTCACHE_WAYS];
+static uint8_t  g_scratch[ARTCACHE_SCRATCH_SZ];
+
+/* Monotonic "draw order" counter. At ~6 stamps per frame and 30 fps a u32 lasts
+ * ~270 days of continuous scrolling; a wrap costs at worst one bad eviction. */
+static uint32_t g_clock;
+
+static int noart(int idx)
+{
+    return (g_noart[idx >> 3] >> (idx & 7)) & 1;
+}
+
+static void set_noart(int idx, int on)
+{
+    uint8_t bit = (uint8_t)(1u << (idx & 7));
+    if (on) {
+        g_noart[idx >> 3] |= bit;
+    } else {
+        g_noart[idx >> 3] = (uint8_t)(g_noart[idx >> 3] & ~bit);
+    }
+}
+
+/* Find the way holding `idx`, or -1. Linear over 16 — a handful of calls per
+ * frame, so a scan beats carrying a second index. */
+static int find(int idx)
+{
+    for (int i = 0; i < ARTCACHE_WAYS; i++) {
+        if (g_way[i].key == (int16_t)idx) {
+            return i;
+        }
+    }
+    return -1;
+}
 
 void artcache_reset(void)
 {
     for (int i = 0; i < ARTCACHE_SLOTS; i++) {
-        g_slot[i].state    = SLOT_EMPTY;
-        g_slot[i].thm_clus = 0;
-        g_slot[i].art_clus = 0;
+        g_album[i].thm_clus = 0;
+        g_album[i].art_clus = 0;
+        g_album[i].thm_size = 0;
+        g_album[i].art_size = 0;
     }
+    for (unsigned i = 0; i < sizeof g_noart; i++) {
+        g_noart[i] = 0;
+    }
+    for (int i = 0; i < ARTCACHE_WAYS; i++) {
+        g_way[i].key   = -1;
+        g_way[i].state = WAY_EMPTY;
+        g_way[i].stamp = 0;
+    }
+    g_clock = 0;
 }
 
-void artcache_queue(int slot, uint32_t thm_clus, uint32_t thm_size,
+void artcache_init(void)
+{
+    artcache_reset();
+}
+
+uint8_t *artcache_scratch(void)
+{
+    return g_scratch;
+}
+
+void artcache_queue(int idx, uint32_t thm_clus, uint32_t thm_size,
                     uint32_t art_clus, uint32_t art_size)
 {
-    if (slot < 0 || slot >= ARTCACHE_SLOTS) {
+    if (idx < 0 || idx >= ARTCACHE_SLOTS) {
         return;
     }
-    slot_t *s = &g_slot[slot];
-    /* Same cover already tracked in this slot: leave its state (and any cached
-     * pixels or prior FAILED verdict) alone so a per-frame re-queue is free. */
-    if (s->state != SLOT_EMPTY && s->thm_clus == thm_clus &&
-        s->art_clus == art_clus) {
-        return;
+    /* A sidecar too big for the staging buffer could never be read, so record
+     * it as absent rather than storing a size that would not fit a u16. */
+    if (thm_size < ARTCACHE_HDR_LEN || thm_size > ARTCACHE_SCRATCH_SZ) {
+        thm_clus = 0;
+        thm_size = 0;
     }
-    s->thm_clus = thm_clus;
-    s->thm_size = thm_size;
-    s->art_clus = art_clus;
-    s->art_size = art_size;
-    s->state    = SLOT_QUEUED;
+    if (art_size < ARTCACHE_HDR_LEN || art_size > ARTCACHE_SCRATCH_SZ) {
+        art_clus = 0;
+        art_size = 0;
+    }
+
+    album_t *al = &g_album[idx];
+    if (al->thm_clus == thm_clus && al->art_clus == art_clus &&
+        al->thm_size == (uint16_t)thm_size && al->art_size == (uint16_t)art_size) {
+        return;                                /* unchanged: a re-queue is free */
+    }
+
+    al->thm_clus = thm_clus;
+    al->thm_size = (uint16_t)thm_size;
+    al->art_clus = art_clus;
+    al->art_size = (uint16_t)art_size;
+
+    /* Different art for this album: forget the old verdict and the old pixels
+     * so the next artcache_get re-arms it. */
+    set_noart(idx, 0);
+    int w = find(idx);
+    if (w >= 0) {
+        g_way[w].key   = -1;
+        g_way[w].state = WAY_EMPTY;
+        g_way[w].stamp = 0;
+    }
 }
 
-const uint16_t *artcache_get(int slot)
+const uint16_t *artcache_get(int idx)
 {
-    if (slot < 0 || slot >= ARTCACHE_SLOTS) {
+    if (idx < 0 || idx >= ARTCACHE_SLOTS) {
         return 0;
     }
-    if (g_slot[slot].state != SLOT_LOADED) {
+
+    int w = find(idx);
+    if (w >= 0) {
+        g_way[w].stamp = ++g_clock;            /* still on screen */
+        return g_way[w].state == WAY_LOADED ? g_way[w].px : 0;
+    }
+
+    /* Not resident. Nothing to claim a way for if we already know this album
+     * has no usable art, or if no sidecar was ever registered for it. */
+    if (noart(idx) || (g_album[idx].thm_clus == 0 && g_album[idx].art_clus == 0)) {
         return 0;
     }
-    return g_slot[slot].px;
+
+    /* Claim a way: a free one, else the least recently drawn. Because every
+     * visible row stamps its way on this same call each frame, the victim is
+     * always something off screen. */
+    int victim = 0;
+    for (int i = 0; i < ARTCACHE_WAYS; i++) {
+        if (g_way[i].key < 0) {
+            victim = i;
+            break;
+        }
+        if (g_way[i].stamp < g_way[victim].stamp) {
+            victim = i;
+        }
+    }
+    g_way[victim].key   = (int16_t)idx;
+    g_way[victim].state = WAY_QUEUED;
+    g_way[victim].stamp = ++g_clock;
+    return 0;                                  /* pump will fill it */
 }
 
-/* Read + validate a CoreArt sidecar (clus/size) into g_scratch and downscale it
- * into `dst` (22x22). Returns 1 on success, 0 on any failure. */
+/* Read + validate a CoreArt sidecar (clus/size) into g_scratch and shrink it
+ * into `dst` (ARTCACHE_DIM square). Returns 1 on success, 0 on any failure. */
 static int load_one(fat32_t *fs, uint32_t clus, uint32_t size, uint16_t *dst)
 {
-    if (clus == 0 || size < ART_HDR_LEN || size > sizeof g_scratch) {
+    if (clus == 0 || size < ARTCACHE_HDR_LEN || size > sizeof g_scratch) {
         return 0;
     }
     int32_t n = fat32_read_file(fs, clus, g_scratch, size);
-    if (n < (int32_t)ART_HDR_LEN) {
+    if (n < (int32_t)ARTCACHE_HDR_LEN) {
         return 0;
     }
     if (g_scratch[0] != 'C' || g_scratch[1] != 'A' ||
@@ -102,40 +215,57 @@ static int load_one(fat32_t *fs, uint32_t clus, uint32_t size, uint16_t *dst)
     }
     int w = g_scratch[6] | (g_scratch[7] << 8);
     int h = g_scratch[8] | (g_scratch[9] << 8);
-    if (w <= 0 || h <= 0 || w > ART_MAX_DIM || h > ART_MAX_DIM) {
+    if (w <= 0 || h <= 0 || w > ARTCACHE_MAX_DIM || h > ARTCACHE_MAX_DIM) {
         return 0;
     }
-    if ((int32_t)(ART_HDR_LEN + w * h * 2) > n) {
+    if ((int32_t)(ARTCACHE_HDR_LEN + w * h * 2) > n) {
         return 0;
     }
-    thumb_downscale_rgb565((const uint16_t *)(g_scratch + ART_HDR_LEN), w, h,
-                           dst, ARTCACHE_DIM, ARTCACHE_DIM);
+    /* Box-average: a chip is a big shrink (120 -> 28) and nearest-neighbour
+     * there shimmers as the list scrolls. This runs once per album, off the
+     * audio path, so the averaging is free at this cadence. A 28x28 folder.thm
+     * hits thumb_box_rgb565's 1:1 fast path and is copied verbatim. */
+    thumb_box_rgb565((const uint16_t *)(g_scratch + ARTCACHE_HDR_LEN), w, h,
+                     dst, ARTCACHE_DIM, ARTCACHE_DIM);
     return 1;
 }
 
 int artcache_pump(fat32_t *fs)
 {
-    int slot = -1;
-    for (int i = 0; i < ARTCACHE_SLOTS; i++) {
-        if (g_slot[i].state == SLOT_QUEUED) {
-            slot = i;
-            break;
+    /* Most recently drawn QUEUED way first, so the covers the user can actually
+     * see resolve before ones they have scrolled away from. */
+    int pick = -1;
+    for (int i = 0; i < ARTCACHE_WAYS; i++) {
+        if (g_way[i].state != WAY_QUEUED) {
+            continue;
+        }
+        if (pick < 0 || g_way[i].stamp > g_way[pick].stamp) {
+            pick = i;
         }
     }
-    if (slot < 0 || fs == 0) {
+    if (pick < 0 || fs == 0) {
         return 0;
     }
 
-    slot_t *s = &g_slot[slot];
+    way_t *s = &g_way[pick];
+    const album_t *al = &g_album[s->key];
     /* Clusters were pre-resolved at library-load, so this is a direct file read
      * — no directory scan. Prefer folder.thm: it is pre-baked at exactly
      * ARTCACHE_DIM (28x28) by tools/coreart.py, so the load is a ~1.5KB read +
-     * a 1:1 copy (thumb_downscale is identity when src==dst) — no big read, no
-     * resample. folder.art (120x120) is only the fallback for an album that
-     * somehow lacks a thm (it downscales, still correct just slower). */
-    int ok = load_one(fs, s->thm_clus, s->thm_size, s->px) ||
-             load_one(fs, s->art_clus, s->art_size, s->px);
+     * a 1:1 copy — no big read, no resample. folder.art (120x120) is only the
+     * fallback for an album that somehow lacks a thm. */
+    int ok = load_one(fs, al->thm_clus, al->thm_size, s->px) ||
+             load_one(fs, al->art_clus, al->art_size, s->px);
 
-    s->state = ok ? SLOT_LOADED : SLOT_FAILED;
+    if (ok) {
+        s->state = WAY_LOADED;
+    } else {
+        /* No usable art: remember that in one bit and hand the way back, so a
+         * cover-less album costs no pixels and is never retried. */
+        set_noart(s->key, 1);
+        s->key   = -1;
+        s->state = WAY_EMPTY;
+        s->stamp = 0;
+    }
     return 1;
 }
