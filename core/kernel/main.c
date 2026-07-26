@@ -30,6 +30,7 @@
 #include "clock.h"
 #include "cache.h"
 #include "console.h"
+#include "config.h"
 #include "../ui/text.h"
 #include "../ui/thumb.h"
 #include "../ui/artcache.h"
@@ -2305,6 +2306,71 @@ static void settings_apply(void)
     theme_set(g_settings.theme);           /* Linen / Onyx -> live palette swap */
 }
 
+/* ---------------------------------------------------------------------------
+ * Settings persistence (kernel/config.c) — DEBOUNCED.
+ *
+ * A disk write per wheel tick would mean dozens of writes for one volume sweep:
+ * pointless drive wear, a spin-up the user can hear, and dozens of chances to
+ * be interrupted mid-write. So every mutation of g_settings just marks the
+ * state dirty and stamps the time; the main loop commits ONE write once the
+ * user has stopped fiddling, and leaving the Settings screen forces it
+ * immediately (the natural "I'm done" moment).
+ *
+ * settings_touch() is called from every site that changes g_settings. If you
+ * add another, call it there too — a missed call means the change is simply
+ * not persisted, which is the safe direction to fail.
+ * ------------------------------------------------------------------------- */
+#define CFG_SAVE_DEBOUNCE_US  3000000u    /* 3 s after the last change */
+
+static int      g_cfg_dirty;              /* a change is pending a write   */
+static uint32_t g_cfg_dirty_us;           /* when the last change happened */
+
+static void settings_touch(void)
+{
+    g_cfg_dirty    = 1;
+    g_cfg_dirty_us = mmio_read32(USEC_TIMER_ADDR);
+}
+
+/*
+ * Commit a pending save. `force` skips the debounce (used when leaving the
+ * Settings screen and before suspend). A failure is logged and the dirty flag
+ * is cleared anyway: config_save() leaves the previous good slot intact, so the
+ * only cost is that this session's change does not persist — and retrying every
+ * pass would just hammer a drive that is already unhappy.
+ */
+static void settings_commit(int force)
+{
+    if (!g_cfg_dirty) {
+        return;
+    }
+    if (!force) {
+        if ((uint32_t)(mmio_read32(USEC_TIMER_ADDR) - g_cfg_dirty_us)
+                < CFG_SAVE_DEBOUNCE_US) {
+            return;
+        }
+        /* Don't spin the platters up just to save 1 KB. If the drive is parked
+         * while audio plays out of the anti-skip buffer, the write would cost
+         * a multi-second, audible spin-up for something with no deadline —
+         * so keep the change pending and let it ride out on the next refill,
+         * on playback stopping, or on the forced commit at suspend/power-off.
+         * The record stays in RAM either way; the only thing at risk is a
+         * battery pull, and the forced paths cover every graceful exit. */
+        if (ata_is_parked() && player_active()) {
+            return;
+        }
+    }
+    g_cfg_dirty = 0;
+    if (!config_writable()) {
+        return;                            /* no CORECFG.DAT — nothing to do */
+    }
+    int rc = config_save(&g_settings);
+    uart_puts("core: cfg save rc ");
+    uart_put_hex32((uint32_t)rc);
+    uart_puts(" seq ");
+    uart_put_hex32(config_seq());
+    uart_putc('\n');
+}
+
 static void settings_render_cur(void)
 {
     if (g_set_screen == SETTINGS_ABOUT) {
@@ -3206,6 +3272,7 @@ static void paint_current_screen(void)
 _Noreturn static void enter_standby(void)
 {
     player_stop();
+    settings_commit(1);                   /* persist before the PMU cuts power */
     console_clear(0x0000);                /* blank BEFORE the power cut so no */
     lcd_present_fb(console_framebuffer()); /* stale colour lingers on the panel */
     cpu_wait_ms(80);                      /* let the BCM push the black frame  */
@@ -3235,6 +3302,10 @@ static void suspend_to_ram(uint32_t play_down_us)
     if (was_playing) {
         player_pause();                   /* silence + stop feeding the disk */
     }
+    /* Last chance to persist: after this the drive is parked and the user may
+     * never wake the device again (battery pull, dead cell). Forced, so a
+     * change made 1 s ago is not lost to the debounce. */
+    settings_commit(1);
     ata_standby();                        /* spin the platters down (quiet, low-power) */
     /* Clear to black BEFORE cutting the backlight, so the transflective panel
      * doesn't faintly ghost the last UI in ambient light while asleep. Wake
@@ -3326,8 +3397,36 @@ _Noreturn static void run_ui(fat32_t *fs)
     g_menu_accum = 0;
     g_artist_filter[0] = '\0';
     g_artist_sel = g_artist_accum = 0;
+    /*
+     * Settings: defaults FIRST, then let the saved record overwrite them.
+     * config_load() only touches g_settings when it finds a record whose
+     * magic, version and CRC all check out, so any failure — file absent,
+     * torn write, corrupt slot, unresolvable cluster — leaves the full
+     * default set in place. Defaults are the floor, never skipped.
+     */
     settings_defaults(&g_settings);
-    settings_apply();                     /* push shuffle/repeat/volume defaults  */
+    int cfg_ok = config_load(fs, &g_settings);
+    uart_puts("core: cfg load ");
+    uart_put_hex32((uint32_t)cfg_ok);
+    uart_puts(" writable ");
+    uart_put_hex32((uint32_t)config_writable());
+    uart_puts(" seq ");
+    uart_put_hex32(config_seq());
+    /* The address a save WOULD target, printed before any write can happen.
+     * The first on-device bring-up must check this against the LBA
+     * tools/make_config.py --verify computes on the host (see the procedure
+     * at the top of kernel/config.c) — a mismatch here is the failure mode
+     * that destroys a music library. */
+    uint32_t cfg_lba0 = 0, cfg_lba1 = 0;
+    (void)config_probe_lba(0, &cfg_lba0);
+    (void)config_probe_lba(1, &cfg_lba1);
+    uart_puts(" lba ");
+    uart_put_hex32(cfg_lba0);
+    uart_putc('/');
+    uart_put_hex32(cfg_lba1);
+    uart_putc('\n');
+    settings_apply();                     /* push shuffle/repeat/volume out       */
+    g_cfg_dirty = 0;                      /* loading is not a change to save back */
     g_scr_n = 0;
     scr_push(SCR_MENU);
 
@@ -3727,6 +3826,7 @@ _Noreturn static void run_ui(fat32_t *fs)
                     (void)prev_vol;   /* no click on volume — it's a slider, not nav */
                     hal_volume_set(g_volume);
                     g_settings.volume = g_volume;         /* keep Settings in sync */
+                    settings_touch();     /* debounced: one write per volume sweep */
                     ui_window_arm(&g_vol_show);
                     dirty = 1;
                 }
@@ -3776,6 +3876,7 @@ _Noreturn static void run_ui(fat32_t *fs)
                         if (dd < -4) dd = -4;
                         settings_adjust(g_set_screen, &g_settings, g_set_sel, dd);
                         settings_apply();                  /* live volume/etc.  */
+                        settings_touch();                  /* debounced save    */
                         /* Brightness slider: light up to the new level as you
                          * turn, so the wheel drives the panel in real time. */
                         if (g_set_screen == SETTINGS_DISPLAY && g_set_sel == 1) {
@@ -3814,8 +3915,10 @@ _Noreturn static void run_ui(fat32_t *fs)
                         } else if (act == SETTINGS_ACTION_RESET) {
                             settings_defaults(&g_settings);
                             settings_apply();
+                            settings_touch();              /* persist the reset */
                         } else {                           /* toggled/cycled    */
                             settings_apply();
+                            settings_touch();
                         }
                     }
                     dirty = 1;
@@ -3829,6 +3932,10 @@ _Noreturn static void run_ui(fat32_t *fs)
                         g_set_accum = 0;
                     } else {
                         scr_pop();                          /* leave Settings    */
+                        /* The natural "I'm done" moment: commit now rather than
+                         * waiting out the debounce, so the record is on the
+                         * platter before the user can reach for the Hold switch. */
+                        settings_commit(1);
                     }
                     dirty = 1;
                 }
@@ -3889,6 +3996,13 @@ _Noreturn static void run_ui(fat32_t *fs)
          * cadence. ata_is_parked() is the shared truth, so we never re-issue
          * STANDBY on an already-parked drive. On an iFlash/SSD mod this is a
          * harmless no-op. */
+        /* Debounced settings write. Deliberately placed BEFORE the spin-down
+         * check below: if a save is due we want it to land while the platters
+         * are still turning, rather than parking the drive and immediately
+         * spinning it back up for a 1 KB write. Nothing happens here unless a
+         * setting actually changed and the user has since gone quiet. */
+        settings_commit(0);
+
         const uint32_t disk_idle_us = 20000000u;   /* 20 s: saves ~100 mA, no thrash */
         if ((!player_active() || player_is_paused())
             && !ata_is_parked() && idle > disk_idle_us) {

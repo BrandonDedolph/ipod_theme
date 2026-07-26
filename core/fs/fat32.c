@@ -171,7 +171,7 @@ static int cluster_valid(const fat32_t *fs, uint32_t clus)
 /* First FS-sector of a data cluster (clusters are numbered from 2). Callers
  * must have passed `clus` through cluster_valid() first — that is what
  * guarantees this multiply-add cannot wrap. */
-static uint32_t cluster_fs_sector(fat32_t *fs, uint32_t clus)
+static uint32_t cluster_fs_sector(const fat32_t *fs, uint32_t clus)
 {
     return fs->data_start + (clus - 2u) * fs->sec_per_clus;
 }
@@ -919,4 +919,120 @@ uint32_t fat32_stream_skip(fat32_stream_t *st, uint32_t n)
         }
     }
     return done;
+}
+
+/* ---------------------------------------------------------------------------
+ * ABSOLUTE LBA RESOLUTION — THE ONE PLACE A MISTAKE BECOMES DATA LOSS.
+ *
+ * Every other function in this file only ever READS. This one exists so a
+ * caller can WRITE back into a pre-allocated file's own data area
+ * (kernel/config.c), and it is the single point where a wrong number stops
+ * being a failed read and starts being somebody's music library overwritten.
+ * Read the formula note below before changing a character of it.
+ *
+ * THE FORMULA. cluster_fs_sector() returns FS-SECTORS — units of
+ * fs->bytes_per_sec (2048 on the stock 80 GB volume), NOT 512-byte LBAs. Every
+ * read path in this file multiplies by fs->sec_ratio before it reaches the
+ * block callback; see read_fs_sector() above:
+ *
+ *     fs->read(fs->ud, fs->part_lba + fs_sec * fs->sec_ratio, fs->sec_ratio, …)
+ *
+ * and the bulk paths in fat32_read_file() / fat32_stream_read() compose it
+ * identically. So the absolute 512-byte LBA of a cluster's first sector is
+ *
+ *     fs->part_lba + cluster_fs_sector(fs, clus) * fs->sec_ratio
+ *
+ * WITHOUT the "* sec_ratio" the result is 4x too small on a 2048-byte volume,
+ * and that does not land somewhere harmless — it lands a few hundred sectors
+ * past the partition start, i.e. INSIDE THE FAT. Writing there destroys the
+ * allocation tables for the whole volume.
+ *
+ * Returns 0 and fills *lba / *max_sectors only when every check below passes;
+ * on ANY doubt it returns an error and writes 0 to both out-params, so a
+ * caller that ignores the return code still cannot address a sector.
+ * ------------------------------------------------------------------------- */
+int fat32_file_lba(const fat32_t *fs, uint32_t first_clus,
+                   uint32_t *lba, uint32_t *max_sectors)
+{
+    if (fs == 0 || lba == 0 || max_sectors == 0) {
+        return FAT32_EINVAL;
+    }
+    /* Fail closed: never leave a plausible-looking address behind. */
+    *lba         = 0;
+    *max_sectors = 0;
+
+    if (fs->sec_ratio == 0 || fs->sec_per_clus == 0) {
+        return FAT32_ECORRUPT;      /* unmounted / impossible geometry */
+    }
+
+    /* 1. The cluster must be one this volume can actually address. Same gate
+     *    every read takes, and it is what makes the multiply below provably
+     *    non-wrapping in FS-sector units. */
+    if (!cluster_valid(fs, first_clus)) {
+        return FAT32_ECORRUPT;
+    }
+
+    uint32_t fs_sec = cluster_fs_sector(fs, first_clus);
+
+    /* 2. FS-sectors -> 512-byte sectors, overflow-checked BEFORE the multiply
+     *    rather than after (an overflowed product is already a wild address;
+     *    there is nothing left to detect once it has wrapped). */
+    if (fs_sec > 0xFFFFFFFFu / fs->sec_ratio) {
+        return FAT32_ECORRUPT;
+    }
+    uint32_t rel = fs_sec * fs->sec_ratio;
+
+    /* 3. …then add the partition base, same check again. */
+    if (rel > 0xFFFFFFFFu - fs->part_lba) {
+        return FAT32_ECORRUPT;
+    }
+    uint32_t abs_lba = fs->part_lba + rel;
+
+    /* 4. A data cluster is never sector 0 of the disk (the MBR) nor the
+     *    partition's own boot sector: data_start is at least the reserved
+     *    sectors plus the FATs past the partition start, so abs > part_lba
+     *    always holds for a sane BPB. Assert it anyway — this is the check
+     *    that catches "the caller handed us a struct that was never mounted",
+     *    where every field is zero and the arithmetic above is perfectly
+     *    happy to hand back LBA 0. */
+    if (abs_lba == 0 || abs_lba <= fs->part_lba) {
+        return FAT32_ECORRUPT;
+    }
+
+    /* 5. Contiguously addressable run: exactly ONE cluster. We deliberately do
+     *    NOT follow the chain — the next cluster of a fragmented file is
+     *    somewhere else entirely, and a caller that assumed contiguity would
+     *    run off the end of this cluster straight into a neighbouring file.
+     *    One cluster is 32 KB on the stock volume, far more than the config
+     *    record needs. */
+    uint32_t run = fs->sec_per_clus * fs->sec_ratio;    /* <= 255 * 8 */
+    if (run == 0 || run > 0xFFFFFFFFu - abs_lba) {
+        return FAT32_ECORRUPT;
+    }
+
+    /* 6. The whole run must sit inside the partition. total_clus comes from
+     *    TotSec32/TotSec16 and is 0 ("unknown") on the synthetic test images
+     *    and on a BPB missing both size fields; there cluster_valid()'s
+     *    FAT-addressability ceiling (step 1) is the only bound available and
+     *    we have nothing tighter to add. When it IS known, use it — it is the
+     *    only check here that knows where the volume ENDS. */
+    if (fs->total_clus != 0) {
+        uint32_t end_fs_sec = fs->data_start;
+        if (fs->total_clus <= (0xFFFFFFFFu - end_fs_sec) / fs->sec_per_clus) {
+            end_fs_sec += fs->total_clus * fs->sec_per_clus;
+            if (end_fs_sec <= 0xFFFFFFFFu / fs->sec_ratio) {
+                uint32_t end_rel = end_fs_sec * fs->sec_ratio;
+                if (end_rel <= 0xFFFFFFFFu - fs->part_lba) {
+                    uint32_t end_lba = fs->part_lba + end_rel;
+                    if (abs_lba + run > end_lba) {
+                        return FAT32_ECORRUPT;
+                    }
+                }
+            }
+        }
+    }
+
+    *lba         = abs_lba;
+    *max_sectors = run;
+    return 0;
 }

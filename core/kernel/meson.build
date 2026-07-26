@@ -10,4 +10,10 @@
 # SER0 UART and the BCM panel directly), which is why it lives in
 # kernel_sources rather than in a portable library.
 
-kernel_sources = files('main.c', 'sched.c', 'switch.S', 'irq.c', 'timer.c', 'clock.c', 'console.c', 'pcm_ring.c', 'cache.c', 'panic.c')
+# config.c is the ONLY code in the firmware that writes to the user's disk
+# (settings persistence into a pre-allocated CORECFG.DAT, overwritten in place
+# so no filesystem metadata is ever mutated). It is also the only caller of
+# ata_write_sectors. Its record codec + the write path's register grammar are
+# covered host-side by tests/kernel/config_test.c.
+
+kernel_sources = files('main.c', 'sched.c', 'switch.S', 'irq.c', 'timer.c', 'clock.c', 'console.c', 'pcm_ring.c', 'cache.c', 'panic.c', 'config.c')

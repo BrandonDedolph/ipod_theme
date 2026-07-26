@@ -311,6 +311,56 @@ if target == 'sim'
   )
   test('pcm-ring', pcm_ring_test, suite: 'unit')
 
+  # config: settings persistence (kernel/config.c) — the ONLY code in the
+  # firmware that writes to the user's disk, so this is the highest-stakes
+  # test in the suite. Four layers over an in-RAM FAT32 volume with
+  # BytesPerSector 2048 at a non-zero partition base (the geometry that makes
+  # the right and wrong LBA formulas differ):
+  #   1. fat32_file_lba pins the absolute LBA to
+  #      part_lba + cluster_fs_sector * sec_ratio, and explicitly asserts it
+  #      is NOT the sec_ratio-less value the design doc proposed — which on
+  #      the stock volume lands inside the FAT.
+  #   2. the record codec: round-trip, and rejection of bad magic / version /
+  #      length / a flipped payload, header or padding bit / all-zeros /
+  #      garbage, plus range clamping of a CRC-valid but insane record.
+  #   3. two-slot selection through config_load: newer seq wins, a torn or
+  #      garbage slot loses to a good one, seq WRAPAROUND resolves correctly,
+  #      both-bad keeps defaults, absent/short file disables writing.
+  #   4. the write grammar, host-side under -DMMIO_MOCK: the exact
+  #      WRITE SECTORS 0x30 / task-file / DRQ-out / FLUSH CACHE 0xE7 sequence
+  #      ata.c emits, at the resolved LBA, with slot ALTERNATION asserted —
+  #      plus that a refused save emits ZERO bus events.
+  # Links the real ata.c, so the trace is the driver's, not a re-description
+  # of it. What it cannot prove is that the drive obeys: see the on-device
+  # bring-up procedure at the top of kernel/config.c.
+  config_test = executable(
+    'config_test',
+    sources: ['kernel/config_test.c',
+              '../kernel/config.c',
+              '../fs/fat32.c',
+              '../hal/hw/ata.c',
+              'hw_mmio/mmio_mock.c'],
+    include_directories: [hw_mmio_inc,
+                          include_directories('../kernel', '../fs', '../ui')],
+    c_args: ['-DMMIO_MOCK'],
+  )
+  if py.found()
+    # 5. Host/device format agreement: the fixture is produced by the REAL
+    # host tool (tools/make_config.py --emit), and the test decodes it with
+    # the firmware's own config_decode(). The two encoders are independent
+    # implementations of one spec — offsets, field order, signedness, CRC
+    # polynomial and coverage — so without this they can drift and a freshly
+    # created CORECFG.DAT would be silently rejected on device, with the only
+    # symptom being "settings never persist" on a user's iPod.
+    corecfg_fixture = custom_target('corecfg-fixture',
+      output: 'corecfg_golden.bin',
+      command: [py, files('..' / '..' / 'tools' / 'make_config.py'),
+                '--emit', '@OUTPUT@'])
+    test('config', config_test, args: [corecfg_fixture], suite: 'unit')
+  else
+    test('config', config_test, suite: 'unit')
+  endif
+
   # hw-console: the on-screen debug console (framebuffer + 8x8 hex font).
   # Pure rendering logic, no MMIO — verifies glyph output pixel-for-pixel.
   console_test = executable(
