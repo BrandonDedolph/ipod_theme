@@ -3100,7 +3100,8 @@ static int list_repaint_partial(void)
  * is turned) and decays on its own.
  * ------------------------------------------------------------------------- */
 #define WHEEL_VEL_MAX   8                  /* rows per detent at full tilt      */
-#define WHEEL_FAST_US   40000u             /* < this gap => spinning up         */
+/* (There is deliberately no "fast gap" threshold: the gap between drained
+ * events measures the main loop's period, not the wheel. See wheel_accel_step.) */
 #define WHEEL_IDLE_US   200000u            /* > this gap => new gesture, reset  */
 #define WHEEL_AZ_VEL    3                  /* velocity at which the letter shows */
 #define WHEEL_AZ_HOLD   500000u            /* ...and how long after the last tick */
@@ -3120,25 +3121,66 @@ static int      g_wheel_vel = 1;
 static int      g_wheel_runs;          /* consecutive detents at full velocity */
 static int      g_wheel_letters;       /* 1 = a detent moves a whole letter    */
 
-/* Called once per wheel event: fold this event's arrival time into the velocity
- * and return the current rows-per-detent multiplier. */
-static int wheel_accel_step(void)
+/*
+ * Called once per wheel event with that event's RAW tick delta.
+ *
+ * Speed is measured as ticks per second, NOT as the gap between events. The
+ * gap is the wrong signal: clickwheel_service() latches motion in the 100 Hz
+ * ISR and clickwheel_get_event() drains the accumulator, so an "event" arrives
+ * once per main-loop pass — the gap therefore measures how long the loop took
+ * (render, disk, decode), not how fast the wheel is turning. Deriving velocity
+ * from it meant a fast spin during playback, when passes are longest, looked
+ * SLOWER than the same spin on an idle menu, and the top of the range was
+ * effectively unreachable.
+ *
+ * delta is ticks accumulated since the last drain, so delta/dt is real angular
+ * velocity and is independent of how often we happen to drain. CW_CLICKS_PER_ROT
+ * is 96, so one turn a second is ~96 ticks/s.
+ */
+#define WHEEL_TPS_ACCEL   50u    /* above this, start multiplying rows      */
+#define WHEEL_TPS_LETTER 190u    /* above this (sustained), step letters    */
+#define WHEEL_TPS_SPAN   200u    /* ticks/s from vel 1 to WHEEL_VEL_MAX     */
+
+static uint32_t g_wheel_tps;     /* smoothed ticks/second                   */
+
+static int wheel_accel_step(int delta)
 {
     uint32_t now = mmio_read32(USEC_TIMER_ADDR);
     uint32_t dt  = now - g_wheel_last_us;
     g_wheel_last_us = now;
-    if (dt > WHEEL_IDLE_US) {
-        g_wheel_vel     = 1;                          /* fresh, deliberate move */
+
+    if (dt > WHEEL_IDLE_US) {         /* new gesture: forget the old one */
+        g_wheel_vel     = 1;
         g_wheel_runs    = 0;
-        g_wheel_letters = 0;                          /* gesture over           */
-    } else if (dt < WHEEL_FAST_US) {
-        if (++g_wheel_vel > WHEEL_VEL_MAX) g_wheel_vel = WHEEL_VEL_MAX;
-        if (g_wheel_vel == WHEEL_VEL_MAX && ++g_wheel_runs >= WHEEL_LETTER_RUNS) {
+        g_wheel_letters = 0;
+        g_wheel_tps     = 0;
+        return 1;
+    }
+    if (dt < 1000u) {
+        dt = 1000u;                   /* floor: keep the divide sane */
+    }
+
+    uint32_t mag = (uint32_t)(delta < 0 ? -delta : delta);
+    uint32_t tps = mag * 1000000u / dt;
+    /* Light smoothing so one long loop pass can't spike or drop the estimate. */
+    g_wheel_tps = (g_wheel_tps * 3u + tps) / 4u;
+
+    if (g_wheel_tps <= WHEEL_TPS_ACCEL) {
+        g_wheel_vel = 1;
+    } else {
+        uint32_t over = g_wheel_tps - WHEEL_TPS_ACCEL;
+        uint32_t v    = 1u + (over * (WHEEL_VEL_MAX - 1u)) / WHEEL_TPS_SPAN;
+        g_wheel_vel   = (int)(v > (uint32_t)WHEEL_VEL_MAX ? (uint32_t)WHEEL_VEL_MAX : v);
+    }
+
+    /* Letter mode needs the speed HELD, not just touched, so a single fast
+     * flick doesn't change the control's meaning under your thumb. */
+    if (g_wheel_tps >= WHEEL_TPS_LETTER) {
+        if (++g_wheel_runs >= WHEEL_LETTER_RUNS) {
             g_wheel_letters = 1;
         }
     } else {
-        g_wheel_runs = 0;                             /* easing off             */
-        if (g_wheel_vel > 1) g_wheel_vel--;
+        g_wheel_runs = 0;
     }
     return g_wheel_vel;
 }
@@ -3147,6 +3189,12 @@ static int wheel_accel_step(void)
 static int wheel_letter_mode(void)
 {
     return g_wheel_letters;
+}
+
+/* Smoothed wheel speed in ticks/second (96 ticks = one full rotation). */
+static uint32_t wheel_tps(void)
+{
+    return g_wheel_tps;
 }
 
 /* Forget the gesture entirely. Called when the UI is taken away from the user
@@ -3158,6 +3206,7 @@ static void wheel_accel_reset(void)
     g_wheel_runs    = 0;
     g_wheel_letters = 0;
     g_wheel_last_us = 0;
+    g_wheel_tps     = 0;
 }
 
 /* True while the list is flying past fast enough to want the letter cue. In
@@ -3260,7 +3309,18 @@ static int list_letter_step(int sel, int count, int dir)
     return i;
 }
 
-/* The letter itself, on a centred plate over the flying list. */
+/*
+ * Show the measured wheel speed under the letter. TUNING AID — set to 0 once
+ * WHEEL_TPS_LETTER is calibrated. The thresholds are in ticks/second and the
+ * only way to pick them honestly is to see what a real "fast enough to want
+ * letters" spin actually reads on the device; guessing at them from the 96
+ * ticks/rotation figure has been wrong twice.
+ */
+#define AZ_SHOW_TPS 1
+
+/* The letter itself, on a centred plate over the flying list. In letter mode
+ * the plate grows chevrons, so which unit the wheel is stepping in — rows or
+ * letters — is visible rather than something you infer from the motion. */
 static void az_overlay_render(char ch)
 {
     const int PW = 66, PH = 66;
@@ -3270,6 +3330,24 @@ static void az_overlay_render(char ch)
     char s[2] = { ch, '\0' };
     int w = text_width(s, FONT_TITLE);
     ui_text(px + (PW - w) / 2, py + PH / 2 + 8, s, FONT_TITLE, LINEN_INK);
+
+    if (wheel_letter_mode()) {
+        /* Up/down chevrons: "this wheel now steps letters". */
+        for (int i = 0; i < 6; i++) {
+            console_fill_rect(px + PW / 2 - 5 + i, py + 7 - (i < 3 ? i : 5 - i),
+                              1, 2, LINEN_MUTED2);
+            console_fill_rect(px + PW / 2 - 5 + i, py + PH - 9 + (i < 3 ? i : 5 - i),
+                              1, 2, LINEN_MUTED2);
+        }
+    }
+#if AZ_SHOW_TPS
+    {
+        char n[12];
+        u32_to_dec(n, wheel_tps());
+        int nw = text_width(n, FONT_SMALL);
+        ui_text(px + (PW - nw) / 2, py + PH - 4, n, FONT_SMALL, LINEN_MUTED_D);
+    }
+#endif
 }
 
 /* Busy-wait `us` microseconds (PWM already off) — for the silent gap in the
@@ -3309,7 +3387,10 @@ static void ui_click(void)
 /* Apply a wheel event to a selection index in [0, count) with acceleration. */
 static int wheel_move(int sel, int count, int8_t delta, int *accum)
 {
-    int vel = wheel_accel_step();     /* every event feeds the velocity estimate */
+    /* Feed the RAW delta: it is the tick count since the last drain, which is
+     * what carries the wheel's speed. The clamp below is for the row maths and
+     * would throw exactly that information away. */
+    int vel = wheel_accel_step(delta);
     int wd = delta;
     if (wd >  WHEEL_MAX_DELTA) wd =  WHEEL_MAX_DELTA;
     if (wd < -WHEEL_MAX_DELTA) wd = -WHEEL_MAX_DELTA;
