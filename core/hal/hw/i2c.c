@@ -13,6 +13,7 @@
 
 #include "pp5022.h"
 #include "mmio.h"
+#include "irqlock.h"   /* DEV_EN/DEV_RS RMW vs the timer ISR (see irqlock.h) */
 #include "i2c.h"
 
 #define I2C_MAX_BYTES 4
@@ -41,13 +42,22 @@ static int i2c_wait_idle(void)
 void i2c_init(void)
 {
     /* Clock-gate the I2C block on, then pulse its reset (09-i2c.md,
-     * "Controller init"). DEV_EN/DEV_RS live in the 0x60006000 block. */
+     * "Controller init"). DEV_EN/DEV_RS live in the 0x60006000 block and are
+     * read-modify-written from the timer ISR too (clickwheel_service gates the
+     * OPTO block there), so each RMW pair is IRQ-masked — see irqlock.h. The
+     * reset HOLD sits outside the mask: it is a plain busy-wait with no shared
+     * state, and masking it would add a multi-thousand-cycle IRQ blackout to
+     * every hal_audio_init (i.e. every track change). */
+    uint32_t f = hw_irq_save();
     mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) | DEV_I2C);
     mmio_write32(DEV_RS_ADDR, mmio_read32(DEV_RS_ADDR) | DEV_I2C);
+    hw_irq_restore(f);
     for (volatile uint32_t i = 0; i < I2C_RESET_HOLD_SPIN; i++) {
         /* hold reset */
     }
+    f = hw_irq_save();
     mmio_write32(DEV_RS_ADDR, mmio_read32(DEV_RS_ADDR) & ~DEV_I2C);
+    hw_irq_restore(f);
 
     /* Undocumented clock/config poke the iPod path performs: write 0
      * then 0x80 to 0x600060A4 (09-i2c.md). Required magic; no symbolic

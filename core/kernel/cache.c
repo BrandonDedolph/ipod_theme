@@ -44,14 +44,31 @@ void cache_init(void)
     }
 }
 
+/*
+ * Upper bound on the write-back poll. This function runs INSIDE the audio DMA
+ * completion ISR (hal/hw/audio.c fill_buffer), so an unbounded spin here is
+ * the one place in the tree where a wedged peripheral takes the whole device
+ * down with no serial cable and no debugger — every other wait in the HAL is
+ * bounded (ATA_BSY_SPIN_LIMIT, I2C_BUSY_SPIN_LIMIT, BCM_SPIN_LIMIT,
+ * DMA_STOP_SPIN_LIMIT, UART_TX_SPIN_LIMIT, PLL_LOCK_SPIN_LIMIT) and this now
+ * matches that discipline.
+ *
+ * An 8 KB write-back retires in microseconds; 1<<20 trips is milliseconds even
+ * at 80 MHz, i.e. orders of magnitude past working hardware. On timeout we
+ * PROCEED rather than hang: the worst case is the DMA reading one stale PCM
+ * buffer (a glitch), which is strictly better than a frozen player.
+ */
+#define CACHE_BUSY_SPIN_LIMIT (1u << 20)
+
 void cache_commit(void)
 {
     if ((mmio_read32(CACHE_CTL_ADDR) & CACHE_CTL_ENABLE) == 0) {
         return;                     /* cache off — nothing to flush */
     }
     mmio_write32(CACHE_OP_ADDR, mmio_read32(CACHE_OP_ADDR) | CACHE_OP_FLUSH);
-    while (mmio_read32(CACHE_CTL_ADDR) & CACHE_CTL_BUSY) {
-        /* spin until the write-back completes */
+    uint32_t spin = CACHE_BUSY_SPIN_LIMIT;
+    while ((mmio_read32(CACHE_CTL_ADDR) & CACHE_CTL_BUSY) && --spin != 0) {
+        /* spin until the write-back completes (bounded — see above) */
     }
     __asm__ volatile("nop\n\tnop\n\tnop\n\tnop");
 }
