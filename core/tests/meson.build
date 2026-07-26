@@ -481,7 +481,7 @@ if target == 'sim'
   name_hash_test = executable(
     'name_hash_test',
     sources: ['kernel/name_hash_test.c', 'kernel/name_hash_ref.c'],
-    include_directories: include_directories('kernel'),
+    include_directories: include_directories('kernel', '.'),
     override_options: test_opts,
   )
   test('name-hash', name_hash_test, suite: 'unit')

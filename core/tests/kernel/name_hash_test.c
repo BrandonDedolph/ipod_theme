@@ -26,6 +26,7 @@
 #include <stdint.h>
 
 #include "name_hash_ref.h"
+#include "../xfail.h"   /* xfail_strict(): CORE_TEST_STRICT_XFAIL=1 */
 
 static int fails;
 static int xfails;
@@ -48,6 +49,13 @@ static void xfail_vec(const char *label, const char *utf8, uint32_t want,
 {
     uint32_t got = name_hash_ref(utf8);
     if (got != want) {
+        if (xfail_strict()) {
+            fprintf(stderr,
+                    "[name-hash %s] FAIL (strict xfail): got %08X, want %08X "
+                    "— %s\n", label, got, want, why);
+            fails++;
+            return;
+        }
         printf("[name-hash %s] XFAIL (got %08X, want %08X) — known bug: %s\n",
                label, got, want, why);
         xfails++;
