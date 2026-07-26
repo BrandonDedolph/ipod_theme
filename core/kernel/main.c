@@ -3267,6 +3267,33 @@ static void suspend_to_ram(uint32_t play_down_us)
 }
 
 /*
+ * Panel sleep at idle is DISABLED: it leaves the screen solid WHITE until a
+ * reboot, which is the worst possible failure on a device whose only debug
+ * channel is that screen.
+ *
+ * Mechanism, from docs/hw/02-lcd.md: on the first LCD_UPDATE after LCD_SLEEP the
+ * BCM re-runs its internal LCD panel init and is allowed up to 500 ms for it
+ * ("After waking from sleep, the first update can take up to 500 ms ... because
+ * the BCM is doing internal LCD panel init"). Our commit handshake budgets
+ * BCM_IDLE_SPIN_LIMIT (~2 ms) and RE-KICKS LCD_UPDATE 16 times inside that
+ * window, while every later present streams a fresh 150 KB frame straight into
+ * the in-progress init — so the init never completes and the BCM latches. The
+ * doc names the symptom outright: "If we wake the backlight before the first
+ * update completes, the user sees a 500 ms white flash." We light the backlight
+ * at the input site, ~400 lines before lcd_wake() runs, so it is white, and
+ * there is no bcm_init() anywhere in the tree to recover with — hence the
+ * reboot.
+ *
+ * The backlight LED is by far the larger draw and is already off in this state;
+ * suspend_to_ram() makes the same trade deliberately ("the panel is dark, not
+ * electrically off"). Do NOT re-enable this without (a) a real bcm_init()
+ * bootstrap to recover a failed wake, (b) a wall-clock absorb window on the
+ * first post-wake commit with the re-kick SUPPRESSED, and (c) deferring
+ * backlight-on until that first present has retired.
+ */
+#define PANEL_SLEEP_AT_IDLE  0
+
+/*
  * The UI: one event loop that pumps the background player every pass and
  * dispatches input to the current screen (Main menu / Music menu / Browser /
  * Now Playing) on a stack. MENU pops the screen WITHOUT stopping playback, so a
@@ -3814,8 +3841,10 @@ _Noreturn static void run_ui(fat32_t *fs)
         } else if (bl_state == BL_DIM && idle > off_us) {
             backlight_set(0);
             bl_state = BL_OFF;
-            lcd_sleep();                  /* blank the panel too, not just the LED */
-            panel_slept = 1;
+            if (PANEL_SLEEP_AT_IDLE) {    /* see the note above run_ui() */
+                lcd_sleep();              /* blank the panel too, not just the LED */
+                panel_slept = 1;
+            }
         }
 
         /* Idle CPU-clock scaling: once the screen has timed fully off AND nothing
@@ -3857,6 +3886,7 @@ _Noreturn static void run_ui(fat32_t *fs)
         if (panel_slept && bl_state != BL_OFF) {
             lcd_wake();
             panel_slept = 0;
+            dirty = 1;                    /* never resume onto a stale panel */
         }
 
         /* Lock/unlock plate takes over the screen for ~1s on a Hold edge. Paint
