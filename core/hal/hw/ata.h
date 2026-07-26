@@ -41,6 +41,24 @@ int ata_init(void);
 #define ATA_ERR_IDNF  (-4)
 
 /*
+ * Logical (512-byte) sectors per PHYSICAL sector — the drive's access
+ * granularity, and therefore the alignment/size quantum ata_write_sectors()
+ * enforces. Public because the WRITE path's callers have to size their records
+ * in whole physical sectors: there is no such thing as a 512-byte write on
+ * this drive (the stock 80 GB MK8010GAH returns IDNF for any sub-physical-
+ * sector access — verified on device 2026-07-18), so anything that reasons
+ * about "one atomic sector" must reason in units of this.
+ *
+ * Kept as one definition rather than duplicated into each caller so a future
+ * bump (a 4-logical / 2048-byte-physical drive) cannot leave a stale 2 behind
+ * in a write path.
+ */
+#define ATA_PHYS_LOG  2u
+
+/* Bytes per logical (LBA) sector. */
+#define ATA_SECTOR_SZ 512u
+
+/*
  * Read `count` (1..256) 512-byte sectors starting at LBA `lba` into `buf`
  * (must be 16-bit aligned; needs count*512 bytes). Returns 0 on success,
  * negative per the code table above.

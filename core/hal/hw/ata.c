@@ -39,9 +39,12 @@
  * 2026-07-18: count=1 reads IDNF, count=2 at even LBA succeeds).
  * TODO: auto-detect from IDENTIFY word 106 to also cover 4-logical (2048 B
  * physical) drives.
+ *
+ * ATA_PHYS_LOG / ATA_SECTOR_SZ now live in ata.h: the write path's caller
+ * (kernel/config.c) has to size its record in whole PHYSICAL sectors, and a
+ * second private copy of the quantum is exactly the drift that leaves a
+ * misaligned write behind after a future bump.
  */
-#define ATA_PHYS_LOG   2u
-#define ATA_SECTOR_SZ  512u
 
 /* One physical sector's worth of scratch for the alignment bounce. */
 static uint16_t ata_bounce[ATA_SECTOR_SZ * ATA_PHYS_LOG / 2u];
@@ -556,7 +559,8 @@ int ata_write_sectors(uint32_t lba, uint32_t count, const void *buf)
 {
     /* Reject rather than bounce: see the banner. `lba` and `count` must both
      * be multiples of ATA_PHYS_LOG, and the source must be 16-bit aligned for
-     * the halfword data port. */
+     * the halfword data port. Argument checks come BEFORE the clock hold so a
+     * rejected call leaves the refcount balanced. */
     if (count == 0) {
         return -1;
     }
@@ -567,15 +571,32 @@ int ata_write_sectors(uint32_t lba, uint32_t count, const void *buf)
         return -1;
     }
 
+    /*
+     * Hold the CPU/IDE clock for the WHOLE request — data phase and flush
+     * alike — exactly as ata_read_raw does per command (see ata_clock_hold).
+     * We never rewrite IDE0_PRI_TIMING0, so the PIO strobe widths are frozen
+     * at whatever the chainloader calibrated at 80 MHz while kernel/clock.c
+     * moves the core between 30 and 80. A read issued at the wrong clock is
+     * slow or marginal and fails loudly; a WRITE issued at the wrong clock
+     * can land corrupt bytes on the platter, which does not fail at all. The
+     * debounced settings save runs from the idle main loop, which is
+     * precisely where the core may be sitting at 30 MHz — so this is the
+     * common case, not the corner one. Refcounted, so it is a counter bump
+     * whenever the UI or player already holds a boost.
+     */
+    ata_clock_hold();
+
     const uint8_t *in = (const uint8_t *)buf;
+    int rc = 0;
     while (count > 0) {
         uint32_t chunk = count;
         if (chunk > 256u) {
             chunk = 256u;                       /* per-command cap (NSECTOR) */
         }
         chunk &= ~(ATA_PHYS_LOG - 1u);          /* keep each command aligned */
-        int rc = ata_write_raw(lba, chunk, in);
+        rc = ata_write_raw(lba, chunk, in);
         if (rc != 0) {
+            ata_clock_release();
             return rc;
         }
         in    += chunk * ATA_SECTOR_SZ;
@@ -586,5 +607,7 @@ int ata_write_sectors(uint32_t lba, uint32_t count, const void *buf)
     /* One flush for the whole request, not one per command: the flush is the
      * expensive part and the caller's durability point is "ata_write_sectors
      * returned", not "each 256-sector chunk landed". */
-    return ata_flush_cache();
+    rc = ata_flush_cache();
+    ata_clock_release();
+    return rc;
 }
