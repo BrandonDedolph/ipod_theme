@@ -2,8 +2,72 @@ package firmware
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"testing"
 )
+
+// fakePartitionHead builds the first 0x200 bytes of a firmware
+// partition with a directory header, per core/docs/hw/08-boot-dock.md.
+func fakePartitionHead(marker string, startPtr uint32, version uint16) []byte {
+	b := make([]byte, 0x200)
+	copy(b[DirectoryMarkerOffset:], marker)
+	binary.LittleEndian.PutUint32(b[DirectoryStartPtrOffset:], startPtr)
+	binary.LittleEndian.PutUint16(b[DirectoryVersionOffset:], version)
+	return b
+}
+
+func TestReadDirectoryLocator(t *testing.T) {
+	b := fakePartitionHead("]ih[", 0x4000, 3)
+	loc, err := ReadDirectoryLocator(b)
+	if err != nil {
+		t.Fatalf("ReadDirectoryLocator: %v", err)
+	}
+	if loc.Version != 3 {
+		t.Errorf("Version = %d, want 3", loc.Version)
+	}
+	// Directory start is the LE32 at 0x104 plus the 0x200 bias.
+	if want := uint32(0x4000 + 0x200); loc.Start != want {
+		t.Errorf("Start = %#x, want %#x", loc.Start, want)
+	}
+}
+
+func TestReadDirectoryLocatorBadMarker(t *testing.T) {
+	b := fakePartitionHead("hi!!", 0x4000, 2)
+	if _, err := ReadDirectoryLocator(b); !errors.Is(err, ErrBadDirectoryMarker) {
+		t.Fatalf("err = %v, want ErrBadDirectoryMarker", err)
+	}
+}
+
+func TestReadDirectoryLocatorShort(t *testing.T) {
+	if _, err := ReadDirectoryLocator(make([]byte, 0x100)); !errors.Is(err, ErrShortPartition) {
+		t.Fatalf("err = %v, want ErrShortPartition", err)
+	}
+	if _, err := ReadDirectoryLocator(nil); !errors.Is(err, ErrShortPartition) {
+		t.Fatalf("err = %v, want ErrShortPartition", err)
+	}
+}
+
+func TestReadDirectoryLocatorUnknownVersion(t *testing.T) {
+	// Version 7 is not something the 5G boot ROM recognizes, but the
+	// locator is still returned so a human can see what was found.
+	b := fakePartitionHead("]ih[", 0x1000, 7)
+	loc, err := ReadDirectoryLocator(b)
+	if !errors.Is(err, ErrUnknownDirectoryVersion) {
+		t.Fatalf("err = %v, want ErrUnknownDirectoryVersion", err)
+	}
+	if loc.Version != 7 || loc.Start != 0x1200 {
+		t.Errorf("locator = %+v, want version 7 start 0x1200", loc)
+	}
+}
+
+func TestReadDirectoryLocatorAcceptsKnownVersions(t *testing.T) {
+	for _, v := range KnownDirectoryVersions {
+		if _, err := ReadDirectoryLocator(fakePartitionHead("]ih[", 0, v)); err != nil {
+			t.Errorf("version %d rejected: %v", v, err)
+		}
+	}
+}
 
 func TestDirectoryEntryRoundtrip(t *testing.T) {
 	original := DirectoryEntry{
