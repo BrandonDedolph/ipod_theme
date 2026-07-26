@@ -3110,15 +3110,8 @@ static int list_repaint_partial(void)
  * deciding which letter to stop on. */
 #define WHEEL_AZ_HOLD_LETTER 1200000u
 
-/* Sustained detents at full velocity before the wheel promotes from stepping
- * ROWS to stepping LETTERS. Deliberately a few, so a short fast flick still
- * scrolls normally and only a real "get me across the alphabet" spin switches
- * unit — the mode change is felt, so it must not happen by accident. */
-#define WHEEL_LETTER_RUNS 4
-
 static uint32_t g_wheel_last_us;
 static int      g_wheel_vel = 1;
-static int      g_wheel_runs;          /* consecutive detents at full velocity */
 static int      g_wheel_letters;       /* 1 = a detent moves a whole letter    */
 
 /*
@@ -3138,7 +3131,6 @@ static int      g_wheel_letters;       /* 1 = a detent moves a whole letter    *
  * is 96, so one turn a second is ~96 ticks/s.
  */
 #define WHEEL_TPS_ACCEL   50u    /* above this, start multiplying rows      */
-#define WHEEL_TPS_LETTER 190u    /* above this (sustained), step letters    */
 #define WHEEL_TPS_SPAN   200u    /* ticks/s from vel 1 to WHEEL_VEL_MAX     */
 
 static uint32_t g_wheel_tps;     /* smoothed ticks/second                   */
@@ -3151,7 +3143,6 @@ static int wheel_accel_step(int delta)
 
     if (dt > WHEEL_IDLE_US) {         /* new gesture: forget the old one */
         g_wheel_vel     = 1;
-        g_wheel_runs    = 0;
         g_wheel_letters = 0;
         g_wheel_tps     = 0;
         return 1;
@@ -3173,14 +3164,20 @@ static int wheel_accel_step(int delta)
         g_wheel_vel   = (int)(v > (uint32_t)WHEEL_VEL_MAX ? (uint32_t)WHEEL_VEL_MAX : v);
     }
 
-    /* Letter mode needs the speed HELD, not just touched, so a single fast
-     * flick doesn't change the control's meaning under your thumb. */
-    if (g_wheel_tps >= WHEEL_TPS_LETTER) {
-        if (++g_wheel_runs >= WHEEL_LETTER_RUNS) {
-            g_wheel_letters = 1;
-        }
-    } else {
-        g_wheel_runs = 0;
+    /*
+     * Letter mode engages at exactly the speed the A-Z plate appears, because
+     * the plate IS the indicator for it: seeing the letter means the wheel is
+     * stepping letters. Having a second, higher threshold created a band where
+     * the letter was up but the wheel was still grinding through songs, which
+     * reads as the cue simply not working.
+     *
+     * Latched for the rest of the gesture (cleared on the idle gap at the top
+     * of this function). Re-testing the speed each detent would flip the unit
+     * back and forth mid-spin as the estimate wavers around the threshold —
+     * the control would change meaning under your thumb.
+     */
+    if (g_wheel_vel >= WHEEL_AZ_VEL) {
+        g_wheel_letters = 1;
     }
     return g_wheel_vel;
 }
@@ -3191,11 +3188,18 @@ static int wheel_letter_mode(void)
     return g_wheel_letters;
 }
 
-/* Smoothed wheel speed in ticks/second (96 ticks = one full rotation). */
+/* Print the measured wheel speed (ticks/s) under the letter — a tuning aid for
+ * calibrating WHEEL_TPS_ACCEL against a real spin. Off by default. */
+#define AZ_SHOW_TPS 0
+
+/* Smoothed wheel speed in ticks/second (96 ticks = one full rotation).
+ * Only compiled in for the AZ_SHOW_TPS tuning readout. */
+#if AZ_SHOW_TPS
 static uint32_t wheel_tps(void)
 {
     return g_wheel_tps;
 }
+#endif
 
 /* Forget the gesture entirely. Called when the UI is taken away from the user
  * (backlight off, panel wake, screen change) so a spin that ended before the
@@ -3203,7 +3207,6 @@ static uint32_t wheel_tps(void)
 static void wheel_accel_reset(void)
 {
     g_wheel_vel     = 1;
-    g_wheel_runs    = 0;
     g_wheel_letters = 0;
     g_wheel_last_us = 0;
     g_wheel_tps     = 0;
@@ -3309,18 +3312,10 @@ static int list_letter_step(int sel, int count, int dir)
     return i;
 }
 
-/*
- * Show the measured wheel speed under the letter. TUNING AID — set to 0 once
- * WHEEL_TPS_LETTER is calibrated. The thresholds are in ticks/second and the
- * only way to pick them honestly is to see what a real "fast enough to want
- * letters" spin actually reads on the device; guessing at them from the 96
- * ticks/rotation figure has been wrong twice.
- */
-#define AZ_SHOW_TPS 1
-
-/* The letter itself, on a centred plate over the flying list. In letter mode
- * the plate grows chevrons, so which unit the wheel is stepping in — rows or
- * letters — is visible rather than something you infer from the motion. */
+/* The letter itself, on a centred plate over the flying list. Its presence is
+ * exactly the signal that the wheel is stepping LETTERS rather than rows —
+ * there is deliberately no state where the plate is up and the wheel is still
+ * grinding through individual songs. */
 static void az_overlay_render(char ch)
 {
     const int PW = 66, PH = 66;
@@ -3331,15 +3326,6 @@ static void az_overlay_render(char ch)
     int w = text_width(s, FONT_TITLE);
     ui_text(px + (PW - w) / 2, py + PH / 2 + 8, s, FONT_TITLE, LINEN_INK);
 
-    if (wheel_letter_mode()) {
-        /* Up/down chevrons: "this wheel now steps letters". */
-        for (int i = 0; i < 6; i++) {
-            console_fill_rect(px + PW / 2 - 5 + i, py + 7 - (i < 3 ? i : 5 - i),
-                              1, 2, LINEN_MUTED2);
-            console_fill_rect(px + PW / 2 - 5 + i, py + PH - 9 + (i < 3 ? i : 5 - i),
-                              1, 2, LINEN_MUTED2);
-        }
-    }
 #if AZ_SHOW_TPS
     {
         char n[12];
