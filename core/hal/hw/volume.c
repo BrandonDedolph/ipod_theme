@@ -64,8 +64,17 @@ static void codec_write(uint8_t reg, uint16_t data)
 /* Default output level at bring-up: moderate, headroom below unity. */
 #define VOL_DEFAULT_PCT 70
 
+/*
+ * Cached codec state. This driver is the single owner of everything the user
+ * can change on the codec, and it must be able to reconstruct all of it from
+ * RAM: hal_audio_init() issues a full WM_RESET once per track, so any setting
+ * that lives only in a codec register is gone at every track boundary. See
+ * hal_codec_restore() at the bottom of this file.
+ */
 static int g_percent = VOL_DEFAULT_PCT;
 static int g_balance = 0;                /* -100 (full left) .. +100 (full right) */
+static int g_bass_db;                    /* -12..+12, 0 = flat (EQ left inert)    */
+static int g_treble_db;                  /* -12..+12, 0 = flat                    */
 
 uint16_t hal_volume_out1_word(int percent)
 {
@@ -181,6 +190,8 @@ void hal_tone_set(int bass_db, int treble_db)
 {
     if (bass_db   >  12) bass_db   =  12; else if (bass_db   < -12) bass_db   = -12;
     if (treble_db >  12) treble_db =  12; else if (treble_db < -12) treble_db = -12;
+    g_bass_db   = bass_db;      /* cached so hal_codec_restore can rebuild it */
+    g_treble_db = treble_db;
 
     /* Only route the EQ onto the DAC when the user has actually dialed in
      * some tone; at flat 0/0 it stays on the (silent) ADC path so playback is
@@ -202,4 +213,24 @@ void hal_volume_init(void)
 int hal_volume_get(void)
 {
     return g_percent;
+}
+
+/*
+ * Push the whole cached state back into a freshly reset codec. Called from
+ * wm8758_init() through the wm8758_set_restore() hook (registered by
+ * hal/hw/audio.c), so it runs at the tail of every per-track bring-up.
+ *
+ * Order: gains first, then EQ. Both are ordinary latched writes — the OUT1
+ * pair carries the VU bit on the right write, the EQ bands are independent —
+ * so there is no interaction to sequence beyond "after the rails are up",
+ * which the caller guarantees by construction.
+ *
+ * Deliberately unconditional: writing the defaults back when nothing was
+ * changed costs seven I2C transactions (~a millisecond) once per track and
+ * removes an entire class of "was it dirty?" reasoning.
+ */
+void hal_codec_restore(void)
+{
+    volume_latch();                         /* volume + balance -> OUT1VOL pair */
+    hal_tone_set(g_bass_db, g_treble_db);   /* bass + treble    -> EQ1..EQ5     */
 }
