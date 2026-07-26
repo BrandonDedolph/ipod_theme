@@ -199,7 +199,8 @@ static void panic_screen(uint32_t cause, const panic_regs_t *regs,
         console_str(26, row, "OVERFLOW", PAN_HDR, PAN_BG);
     }
 
-    console_str(0, row + 2, "HALTED - HOLD MENU+SELECT TO RESET",
+    /* No '+' in console.c's font — spell it out rather than draw a blank. */
+    console_str(0, row + 2, "HALTED. HOLD MENU AND SELECT TO RESET",
                 PAN_DIM, PAN_BG);
 
     /* Present blind: lcd_present_fb only ever polls the BCM with bounded
