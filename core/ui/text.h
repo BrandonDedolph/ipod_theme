@@ -4,14 +4,14 @@
  *
  * Draws real Nunito type (gamma-correct grayscale AA) into an RGB565
  * framebuffer. Backed by the pre-rasterized glyph atlases in
- * core/apps/ui/atlas/ headers (our own data). Builds both host-side (sim
+ * core/ui/atlas/ headers (our own data). Builds both host-side (sim
  * test) and freestanding on bare-metal ARM (-DCORE_FREESTANDING): no
  * libc, no libm, no malloc — the gamma blend uses static sRGB<->linear
  * lookup tables, all integer math.
  *
- * Coordinate convention: matches the sim's atlas_render — the pen `y`
- * is the text BASELINE (the bottom of non-descender glyphs), the
- * standard typography origin. `x` is the left edge of the pen.
+ * Coordinate convention: the pen `y` is the text BASELINE (the bottom of
+ * non-descender glyphs), the standard typography origin. `x` is the left
+ * edge of the pen.
  */
 
 #ifndef CORE_UI_TEXT_H

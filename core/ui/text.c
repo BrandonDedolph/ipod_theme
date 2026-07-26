@@ -2,16 +2,15 @@
 /*
  * core/ui/text.c — freestanding antialiased text rendering.
  *
- * This is the freestanding sibling of core/apps/ui/atlas.c: the same
- * gamma-correct alpha blend and glyph layout, but libc-free and drawing
+ * A gamma-correct alpha blend and glyph layout that is libc-free and draws
  * into a caller-supplied RGB565 framebuffer with explicit bounds (so it
  * needs neither lcd_framebuffer() nor the compile-time LCD_WIDTH/HEIGHT).
  * It links into core.elf on the device and into the host text_test.
  *
  * The atlas data (glyph metrics + concatenated alpha-coverage rows) lives
- * in the generated core/apps/ui/atlas/ headers; including them here
- * makes the const atlas_t handles resolve at link time — no init step, no
- * TTF parsing, no allocation. Everything is .rodata.
+ * in the generated core/ui/atlas/ headers; including them here makes the
+ * const atlas_t handles resolve at link time — no init step, no TTF
+ * parsing, no allocation. Everything is .rodata.
  */
 
 #include "text.h"
