@@ -57,4 +57,29 @@ int ata_wakeup(void);
  */
 int ata_is_parked(void);
 
+/*
+ * Write `count` 512-byte sectors from `buf` to LBA `lba`, then FLUSH CACHE so
+ * the data is on the platters and not just in the drive's write cache (which
+ * is enabled by default — without the flush, a battery pull between the write
+ * and the drive's own writeback loses it silently).
+ *
+ * *** UNVERIFIED ON HARDWARE, AND DELIBERATELY UNWIRED. *** Nothing in the
+ * firmware calls this. It is a reviewed primitive; the calling layer lands
+ * separately, and whoever writes it must first prove this on device against a
+ * scratch LBA (write, read back, compare). Unlike a bad read, a bad write
+ * destroys data.
+ *
+ * ALIGNMENT: `lba` and `count` must BOTH be multiples of the drive's logical-
+ * sectors-per-physical-sector (2 on the stock 80 GB MK8010GAH, which returns
+ * IDNF for any sub-physical-sector access), and `buf` must be 16-bit aligned.
+ * Misalignment is rejected with -1 rather than emulated by a read-modify-
+ * write: an RMW would rewrite bytes the caller never asked to touch and
+ * widens the power-loss window over data that was previously safe.
+ *
+ * Returns 0 on success; -1 on a bad argument (misaligned LBA/count/buffer,
+ * zero count, drive not ready), -2 on a timeout, -3 on a drive error (ERR/DF,
+ * e.g. IDNF for a bad LBA).
+ */
+int ata_write_sectors(uint32_t lba, uint32_t count, const void *buf);
+
 #endif /* CORE_HAL_HW_ATA_H */

@@ -307,3 +307,174 @@ int ata_wakeup(void)
     g_ata_parked = 0;               /* fully spun up and confirmed transferable */
     return 0;
 }
+
+/* ---------------------------------------------------------------------------
+ * PIO WRITE path (LBA28). 04-ata.md, "Read / write paths" -> "Write
+ * differences" + "Power-management commands" -> "Flush cache".
+ *
+ * *** UNVERIFIED ON HARDWARE. *** Every line below is written from the doc
+ * and mirrored off the read path; nothing here has yet touched a real drive,
+ * and it is deliberately NOT wired to any caller — no settings file, no
+ * playlist writer, no caller of any kind. It is a reviewed primitive only,
+ * and the first thing anyone wiring it up must do is confirm it on device
+ * against a scratch LBA (read back and compare) BEFORE letting it near a
+ * region of the disk that matters. A wrong LBA here does not fail loudly the
+ * way a bad read does: it destroys data.
+ *
+ * ALIGNMENT IS NOT OPTIONAL. This drive reports 2 logical sectors per
+ * physical sector and REJECTS sub-physical-sector access with IDNF (see the
+ * ATA_PHYS_LOG comment at the top of this file — verified on device
+ * 2026-07-18: count=1 IDNFs, count=2 at an even LBA succeeds). The read
+ * wrapper hides that with a read-modify-nothing bounce; a write wrapper
+ * cannot do the equivalent safely — a read-modify-write of a physical sector
+ * turns "write these 512 bytes" into "re-write 1024 bytes, half of them from
+ * a stale copy", and a power loss between the read and the write loses data
+ * the caller never asked to touch. So misalignment is REJECTED, loudly, and
+ * the calling layer is expected to deal in whole physical sectors.
+ *
+ * The FLUSH CACHE at the end is load-bearing, not decorative: the drive's
+ * write cache is on by default, so WRITE SECTORS returning success only means
+ * the data reached the drive's DRAM. Without the flush a battery pull (or a
+ * MENU+SELECT reset, or the idle STANDBY path) between the write and the
+ * drive's own writeback loses it silently. 0xE7 is the non-EXT form, which is
+ * the correct choice for this ATA-6-era drive (04-ata.md flush selection
+ * logic step 3: word 83 bit 12).
+ * ------------------------------------------------------------------------- */
+
+#define ATA_CMD_WRITE_SECTORS 0x30   /* LBA28 PIO write (one DRQ per sector) */
+#define ATA_CMD_FLUSH_CACHE   0xE7   /* non-EXT flush (ATA-6+)               */
+
+/* Wait for BSY to clear, bounded by TIME rather than poll count. FLUSH CACHE
+ * on a spun-down or busy drive can hold BSY for seconds — far past
+ * ATA_BSY_SPIN_LIMIT — so the flush needs the same time-based ceiling the
+ * DRQ wait uses. Returns 0 on success, -1 on timeout. */
+static int ata_wait_not_busy_timed(void)
+{
+    uint32_t t0 = mmio_read32(USEC_TIMER_ADDR);
+    while (mmio_read8(ATA_ALT_STATUS_ADDR) & ATA_STATUS_BSY) {
+        if ((uint32_t)(mmio_read32(USEC_TIMER_ADDR) - t0) > ATA_SPINUP_US) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Raw PIO WRITE SECTORS: `count` logical sectors at `lba` from `buf`. Both
+ * must already be physical-sector-aligned (the wrapper guarantees it). The
+ * shape mirrors ata_read_raw exactly — same register programming, same
+ * command-to-status settle, same per-sector DRQ handshake — with the data
+ * direction reversed and a completion wait after the final sector, because on
+ * a write the drive asserts BSY after the last word while it commits.
+ */
+static int ata_write_raw(uint32_t lba, uint32_t count, const void *buf)
+{
+    if (count == 0 || count > 256) {
+        return -1;
+    }
+    if (ata_wait_ready() != 0) {
+        return -1;
+    }
+
+    /* Program the LBA28 transfer. NSECTOR = count (256 wraps to 0). */
+    mmio_write8(ATA_NSECTOR_ADDR, (uint8_t)count);
+    mmio_write8(ATA_SECTOR_ADDR,  (uint8_t)(lba & 0xFF));
+    mmio_write8(ATA_LCYL_ADDR,    (uint8_t)((lba >> 8)  & 0xFF));
+    mmio_write8(ATA_HCYL_ADDR,    (uint8_t)((lba >> 16) & 0xFF));
+    mmio_write8(ATA_SELECT_ADDR,
+                (uint8_t)(ATA_SELECT_OBS | ATA_SELECT_LBA |
+                          ((lba >> 24) & 0x0F)));
+    mmio_write8(ATA_COMMAND_ADDR, ATA_CMD_WRITE_SECTORS);
+
+    /* Command-to-status pipeline guard (~sub-microsecond), as on the read. */
+    for (volatile uint32_t g = 0; g < 64; g++) {
+        /* settle */
+    }
+
+    const uint16_t *in = (const uint16_t *)buf;
+    for (uint32_t s = 0; s < count; s++) {
+        int rc = ata_wait_drq();
+        if (rc != 0) {
+            return rc == -2 ? -3 : -2;   /* -3 drive error, -2 timeout */
+        }
+        /* Read the primary status once to acknowledge, then stream the
+         * sector out: 256 little-endian halfwords, no byte swap. */
+        (void)mmio_read8(ATA_COMMAND_ADDR);
+        for (int w = 0; w < 256; w++) {
+            mmio_write16(ATA_DATA_ADDR, *in++);
+        }
+        uint8_t st = mmio_read8(ATA_ALT_STATUS_ADDR);
+        if (st & (ATA_STATUS_ERR | ATA_STATUS_DF)) {
+            return -3;
+        }
+    }
+
+    /* The drive holds BSY after the final data word while it commits the
+     * transfer; only then is the status meaningful. (The read path has no
+     * equivalent step — its last DRQ IS the last data.) */
+    if (ata_wait_not_busy_timed() != 0) {
+        return -2;
+    }
+    if (mmio_read8(ATA_ALT_STATUS_ADDR) & (ATA_STATUS_ERR | ATA_STATUS_DF)) {
+        return -3;
+    }
+    return 0;
+}
+
+/* Push the drive's write cache to the platters. See the banner above: this is
+ * what makes a returned write durable across a power cut. */
+static int ata_flush_cache(void)
+{
+    if (ata_wait_ready() != 0) {
+        return -1;
+    }
+    mmio_write8(ATA_SELECT_ADDR, ATA_SELECT_OBS);          /* master */
+    mmio_write8(ATA_COMMAND_ADDR, ATA_CMD_FLUSH_CACHE);
+    for (volatile uint32_t g = 0; g < 64; g++) {
+        /* command-to-status settle */
+    }
+    if (ata_wait_not_busy_timed() != 0) {
+        return -2;
+    }
+    if (mmio_read8(ATA_ALT_STATUS_ADDR) & (ATA_STATUS_ERR | ATA_STATUS_DF)) {
+        return -3;
+    }
+    return 0;
+}
+
+int ata_write_sectors(uint32_t lba, uint32_t count, const void *buf)
+{
+    /* Reject rather than bounce: see the banner. `lba` and `count` must both
+     * be multiples of ATA_PHYS_LOG, and the source must be 16-bit aligned for
+     * the halfword data port. */
+    if (count == 0) {
+        return -1;
+    }
+    if ((lba % ATA_PHYS_LOG) != 0 || (count % ATA_PHYS_LOG) != 0) {
+        return -1;
+    }
+    if (((uintptr_t)buf & 1u) != 0) {
+        return -1;
+    }
+
+    const uint8_t *in = (const uint8_t *)buf;
+    while (count > 0) {
+        uint32_t chunk = count;
+        if (chunk > 256u) {
+            chunk = 256u;                       /* per-command cap (NSECTOR) */
+        }
+        chunk &= ~(ATA_PHYS_LOG - 1u);          /* keep each command aligned */
+        int rc = ata_write_raw(lba, chunk, in);
+        if (rc != 0) {
+            return rc;
+        }
+        in    += chunk * ATA_SECTOR_SZ;
+        lba   += chunk;
+        count -= chunk;
+    }
+
+    /* One flush for the whole request, not one per command: the flush is the
+     * expensive part and the caller's durability point is "ata_write_sectors
+     * returned", not "each 256-sector chunk landed". */
+    return ata_flush_cache();
+}

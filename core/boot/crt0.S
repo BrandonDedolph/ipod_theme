@@ -22,10 +22,15 @@
  *   3. Zero .bss, set up the IRQ-mode stack, call kernel_main, hang.
  *
  * The 0x0-based exception vector table forms the first 32 bytes of the
- * image (it IS _start), and the banked IRQ stack is established in
- * reset_handler; IRQs are left MASKED for the C side to unmask after
- * timer_init. The first-level IRQ entry stub (irq_vector_entry) is a leaf
- * ISR that calls the extern C dispatcher irq_dispatch (kernel/irq.c).
+ * image (it IS _start), and the banked IRQ/abort/undefined/FIQ stacks are
+ * established in reset_handler; IRQs are left MASKED for the C side to
+ * unmask after timer_init. The first-level IRQ entry stub
+ * (irq_vector_entry) is a leaf ISR that calls the extern C dispatcher
+ * irq_dispatch (kernel/irq.c). Every OTHER exception vectors to a fault
+ * stub (see "FAULT VECTORS" near the end of this file) that captures the
+ * faulting register state and calls panic() in kernel/panic.c, and
+ * reset_handler paints the supervisor stack so panic can report its
+ * high-water mark.
  *
  * No .data copy is needed (doc step 3 doesn't apply to us): the
  * bootloader loads the entire image into SDRAM and linker.ld links with
@@ -68,17 +73,17 @@ _start:
     /* Absolute (0x0-based) handler literals — kept adjacent to the slots
      * so every `ldr pc` above stays in [pc,#imm] range and the table does
      * not get reordered by an implicit literal pool. */
-_v_undef:   .word trap_hang
-_v_swi:     .word trap_hang
-_v_pabt:    .word trap_hang
-_v_dabt:    .word trap_hang
-_v_resv:    .word trap_hang
-_v_fiq:     .word trap_hang
+_v_undef:   .word undef_vector
+_v_swi:     .word swi_vector
+_v_pabt:    .word pabt_vector
+_v_dabt:    .word dabt_vector
+_v_resv:    .word resv_vector
+_v_fiq:     .word fiq_vector
 _v_irq:     .word irq_vector_entry
 
-    /* Deterministic park for unhandled exceptions — a tight self-branch so
-     * a stray undef/abort/SWI stops here where GDB can see it, instead of
-     * running off into garbage. */
+    /* Deterministic park. Only reached if panic() itself returns (it is
+     * _Noreturn) — a tight self-branch so we stop here rather than running
+     * off into garbage. */
 trap_hang:
     b       trap_hang
 
@@ -216,18 +221,41 @@ post_remap:
     strlo   r2, [r0], #4
     blo     2b
 
-    /* Set up the banked IRQ-mode stack, then return to supervisor. We are
+    /* Set up every banked stack pointer, then return to supervisor. We are
      * post-remap and running at link addresses, so `ldr sp,=` literals now
-     * resolve to live IRAM addresses. Enter IRQ mode (I+F still masked) to
-     * get at the banked SP_irq, point it at its own 1 KB region at the top
-     * of IRAM, then switch back to supervisor and re-load SP_svc. IRQs stay
+     * resolve to live IRAM addresses. SP is banked per mode, so each mode
+     * has to be entered (I+F still masked) to load its own SP. IRQs stay
      * MASKED here — the C side unmasks after timer_init. (The earlier
      * `ldr sp,=_stack_top` at cpu_start ran on the temp/remap stack; this
-     * re-load is harmless and just re-establishes SP_svc post-remap.) */
+     * re-load is harmless and just re-establishes SP_svc post-remap.)
+     *
+     * The abort / undefined / FIQ stacks are what make the fault handlers
+     * below possible at all: a handler entered with an undefined SP cannot
+     * even stash the faulting registers. Sizes + layout: boot/linker.ld. */
+    msr     cpsr_c, #0xD7           @ abort mode     (0x17 | 0xC0)
+    ldr     sp, =_abt_stack_top
+    msr     cpsr_c, #0xDB           @ undefined mode (0x1B | 0xC0)
+    ldr     sp, =_und_stack_top
+    msr     cpsr_c, #0xD1           @ FIQ mode       (0x11 | 0xC0)
+    ldr     sp, =_fiq_stack_top
     msr     cpsr_c, #0xD2           @ IRQ mode, I+F masked (0x12 | 0xC0)
     ldr     sp, =_irq_stack_top
     msr     cpsr_c, #0xD3           @ supervisor mode, I+F masked
     ldr     sp, =_stack_top
+
+    /* Paint the supervisor stack with STACK_PAINT_WORD (kernel/panic.h) so
+     * kernel/panic.c can measure the high-water mark and detect a breach of
+     * the floor. The region is [_stack_limit, _stack_top) and SP is exactly
+     * _stack_top with nothing live below it, so painting it here — after
+     * .bss zero, before the first C call — clobbers nothing. ~89 KB of
+     * word stores, a few ms at 30 MHz, paid once at boot. */
+    ldr     r0, =_stack_limit
+    ldr     r1, =_stack_top
+    ldr     r2, =0xA5A55A5A
+4:
+    cmp     r0, r1
+    strlo   r2, [r0], #4
+    blo     4b
 
     /* Hand off to C. */
     bl      kernel_main
@@ -252,5 +280,135 @@ irq_vector_entry:
     stmfd   sp!, {r0-r3, r12, lr}   @ save caller-saved + return
     bl      irq_dispatch            @ C dispatcher (extern, kernel/irq.c)
     ldmfd   sp!, {r0-r3, r12, pc}^  @ restore + return, ^ = CPSR <- SPSR
+
+    /* ===================================================================
+     * FAULT VECTORS. Every non-IRQ exception used to vector to `trap_hang`,
+     * so a wild-pointer data abort, a cyclic FAT chain, a wedged BCM and a
+     * stuck ATA spin were bit-identical on device: one frozen screen. There
+     * is no serial cable on this unit, so telling them apart is the whole
+     * difference between a 10-minute bug and an unfixable one.
+     *
+     * Each vector now stashes its (banked) LR and SPSR plus a cause code,
+     * switches to abort mode and its dedicated panic stack (boot/linker.ld),
+     * builds a panic_regs_t frame and calls the C panic() in kernel/panic.c,
+     * which dumps it over UART *and* onto the panel.
+     *
+     * RETURN-ADDRESS CORRECTION (ARM7TDMI, ARM ARM "Exceptions"). The core
+     * saves into LR_<mode> the address of the instruction AFTER the one that
+     * was executing, plus the pipeline offset for that exception class, so
+     * the address of the OFFENDING instruction is:
+     *   - data abort:      LR - 8  (abort is taken one instruction late: the
+     *                               load/store had already left the execute
+     *                               stage when the memory system reported)
+     *   - prefetch abort:  LR - 4  (LR points just past the instruction whose
+     *                               FETCH aborted)
+     *   - undefined instr: LR - 4  (LR points just past the undefined opcode)
+     *   - SWI:             LR - 4  (LR points just past the SWI itself)
+     *   - FIQ / reserved:  LR - 4  (asynchronous: LR-4 is the instruction that
+     *                               would have run next, not a "faulting" one)
+     * We apply exactly those and report the corrected value as `pc`, so the
+     * dumped PC can be looked up straight in core.map / the disassembly.
+     *
+     * r0-r12 are NOT banked (except r8-r12 in FIQ mode), so after the mode
+     * switch they still hold the faulting context's values and are dumped
+     * as-is. In the FIQ case r8-r12 read as the INTERRUPTED context's — the
+     * FIQ handler's own banked copies are not recoverable here, which is the
+     * useful direction anyway.
+     * =================================================================== */
+
+    /* Cause codes — MUST match the PANIC_* defines in kernel/panic.h. */
+    .equ    PANIC_UNDEF, 1
+    .equ    PANIC_SWI,   2
+    .equ    PANIC_PABT,  3
+    .equ    PANIC_DABT,  4
+    .equ    PANIC_RESV,  5
+    .equ    PANIC_FIQ,   6
+
+    /* One vector stub: correct LR, stash {spsr, cause, r0, r1, pc} on THIS
+     * mode's own banked stack (5 words — that is all those 256/512-byte
+     * stash stacks ever hold), hand fault_common a pointer to it. */
+    .macro  FAULT_STUB name, cause, adj
+\name:
+    sub     lr, lr, #\adj           @ return-address correction (see above)
+    stmfd   sp!, {r0, r1, lr}       @ [8]=r0 [12]=r1 [16]=faulting pc
+    mrs     r0, spsr
+    mov     r1, #\cause
+    stmfd   sp!, {r0, r1}           @ [0]=spsr [4]=cause
+    mov     r0, sp                  @ r0 -> stash (r0/r1 now free: both saved)
+    b       fault_common
+    .endm
+
+    .global undef_vector
+    .global swi_vector
+    .global pabt_vector
+    .global dabt_vector
+    .global resv_vector
+    .global fiq_vector
+    FAULT_STUB undef_vector, PANIC_UNDEF, 4
+    FAULT_STUB swi_vector,   PANIC_SWI,   4
+    FAULT_STUB pabt_vector,  PANIC_PABT,  4
+    FAULT_STUB dabt_vector,  PANIC_DABT,  8
+    FAULT_STUB resv_vector,  PANIC_RESV,  4
+    FAULT_STUB fiq_vector,   PANIC_FIQ,   4
+
+    /* Common tail. On entry r0 -> the stub's 5-word stash and we are still in
+     * the exception's own mode. Builds a panic_regs_t (kernel/panic.h) on the
+     * dedicated panic stack — laid out ascending as r0..r12, sp, lr, pc, cpsr,
+     * cause — and calls panic(cause, &regs). The stash lives in a DIFFERENT
+     * IRAM region than the panic stack, so reloading SP_abt cannot eat it. */
+fault_common:
+    msr     cpsr_c, #0xD7           @ abort mode, I+F masked: the panic mode
+    ldr     sp, =_panic_stack_top   @ dedicated stack (the faulting one may be
+                                    @ exactly what is broken)
+    ldr     r1, [r0, #4]            @ cause
+    stmfd   sp!, {r1}
+    ldr     r1, [r0, #0]            @ faulting CPSR (this exception's SPSR)
+    stmfd   sp!, {r1}
+    ldr     r1, [r0, #16]           @ corrected faulting PC
+    stmfd   sp!, {r1}
+
+    /* The faulting mode's own SP and LR are banked, so recover them by
+     * briefly re-entering that mode (I+F kept masked). Two hops because only
+     * r0 (the stash pointer) and r1 are free — every other register still
+     * holds a faulting value we have not saved yet. Skipped when the SPSR
+     * says user mode (entering it is a one-way trip: no SPSR to come back
+     * through) or abort mode (a nested abort: SP_abt/LR_abt are now OURS,
+     * not the faulting context's), reported as 0 in both cases. */
+    ldr     r1, [r0, #0]
+    and     r1, r1, #0x1F
+    cmp     r1, #0x10               @ USR
+    beq     5f
+    cmp     r1, #0x17               @ ABT (nested)
+    beq     5f
+    orr     r1, r1, #0xC0
+    msr     cpsr_c, r1
+    mov     r1, lr                  @ faulting mode's LR
+    msr     cpsr_c, #0xD7
+    stmfd   sp!, {r1}
+    ldr     r1, [r0, #0]
+    and     r1, r1, #0x1F
+    orr     r1, r1, #0xC0
+    msr     cpsr_c, r1
+    mov     r1, sp                  @ faulting mode's SP
+    msr     cpsr_c, #0xD7
+    stmfd   sp!, {r1}
+    b       6f
+5:
+    mov     r1, #0
+    stmfd   sp!, {r1}               @ lr unavailable
+    stmfd   sp!, {r1}               @ sp unavailable
+6:
+    stmfd   sp!, {r2-r12}           @ frame[2..12]
+    ldr     r1, [r0, #12]           @ faulting r1
+    ldr     r0, [r0, #8]            @ faulting r0 (last use of the stash ptr)
+    stmfd   sp!, {r0, r1}           @ frame[0..1]
+
+    /* 18 words pushed from an 8-byte-aligned top, so SP is still 8-byte
+     * aligned at the call, per AAPCS. Do not add or remove one word without
+     * padding. */
+    mov     r1, sp                  @ arg1 = &regs
+    ldr     r0, [r1, #17*4]         @ arg0 = cause
+    bl      panic                   @ kernel/panic.c, _Noreturn
+    b       trap_hang               @ unreachable
 
     .size _start, . - _start
