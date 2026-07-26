@@ -497,6 +497,7 @@ static int         g_albumview_n;
  * LIB_MAX_ALBUMS / ARTISTS_MAX / LIB_MAX_GENRES / FOLDER_MAP_MAX), so the
  * truncation isn't silent — the About screen says the library didn't fit. */
 static int         g_lib_truncated;
+static uint32_t     g_lib_load_ms;   /* boot library load time, shown on About */
 
 /* Album art (folder.art) location captured while enumerating the current
  * folder; handed to player_play_queue so the player owns/validates it. */
@@ -1767,10 +1768,39 @@ static uint32_t folder_clus_h(uint32_t hash, const char *name)
 /* A titled loading screen with a determinate progress bar (0..100%). Rendered
  * from the library load phases so a multi-second first-load shows real progress
  * instead of a frozen splash. */
+/*
+ * Rate-limited so callers can call it as often as they like.
+ *
+ * Each call is a console_clear (76,800 pixel writes) plus a full 153,600-byte
+ * lcd_present_fb with IRQs masked. Callers sample on an iteration count, which
+ * scales with the library rather than with what an eye can follow: the boot
+ * resolve pass paints every 4th album, so a 256-album library paid 64 full-frame
+ * repaints — a large slice of "Loading Library" was the bar drawing itself.
+ *
+ * A progress bar needs a handful of updates per second, so drop anything inside
+ * LOAD_BAR_MIN_GAP_US of the last paint. 0% and 100% always paint, so the screen
+ * still appears immediately and always finishes filled.
+ */
+#define LOAD_BAR_MIN_GAP_US 120000u
+
+static uint32_t g_load_bar_last_us;
+static int      g_load_bar_last_pct = -1;
+
 static void load_bar(const char *title, int pct)
 {
     if (pct < 0)   pct = 0;
     if (pct > 100) pct = 100;
+
+    if (pct != 0 && pct != 100) {
+        uint32_t now = mmio_read32(USEC_TIMER_ADDR);
+        if (pct == g_load_bar_last_pct ||
+            (uint32_t)(now - g_load_bar_last_us) < LOAD_BAR_MIN_GAP_US) {
+            return;
+        }
+    }
+    g_load_bar_last_us  = mmio_read32(USEC_TIMER_ADDR);
+    g_load_bar_last_pct = pct;
+
     console_clear(LINEN_SURFACE);
     ui_text_centered(112, title, FONT_TITLE, LINEN_INK);
     int bx = 60, by = 138, bw = LCD_WIDTH - 120, bh = 6;
@@ -1924,11 +1954,40 @@ static int resolve_art_cb(void *ud, const fat32_dirent_t *e)
 static void library_resolve_art(fat32_t *fs)
 {
     for (int s = 0; s < g_songs_n; s++) g_songs[s].file_clus = 0;
-    for (int i = 0; i < g_albums_n; i++) {
-        if ((i & 3) == 0) {                   /* second half of the bar: 75->100% */
-            load_bar("Loading Library",
-                     75 + (g_albums_n ? i * 25 / g_albums_n : 25));
+
+    /*
+     * Walk the albums in ASCENDING CLUSTER order, not menu order.
+     *
+     * This pass reads one directory per album — up to LIB_MAX_ALBUMS of them —
+     * and each read is a seek to wherever that folder's directory cluster
+     * happens to live. Album (alphabetical) order bears no relation to on-disk
+     * order, so the head was being thrown back and forth across an 80 GB platter
+     * a couple of hundred times, and seek time, not transfer time, dominated
+     * "Loading Library". Sorted, the same reads become a single forward sweep,
+     * which is also the order the drive's own readahead can help with.
+     *
+     * Results are written back through the original index, so nothing outside
+     * this function sees a different order.
+     */
+    static uint16_t order[LIB_MAX_ALBUMS];
+    int n = g_albums_n;
+    for (int i = 0; i < n; i++) order[i] = (uint16_t)i;
+    for (int i = 1; i < n; i++) {             /* insertion sort: n <= 256 */
+        uint16_t v = order[i];
+        uint32_t k = g_albums[v].clus;
+        int j = i - 1;
+        while (j >= 0 && g_albums[order[j]].clus > k) {
+            order[j + 1] = order[j];
+            j--;
         }
+        order[j + 1] = v;
+    }
+
+    for (int p = 0; p < n; p++) {
+        int i = order[p];
+        /* load_bar is time-throttled, so calling it per album is free and the
+         * bar advances smoothly instead of in 4-album jumps. */
+        load_bar("Loading Library", 75 + (n ? p * 25 / n : 25));
         g_res_art_clus = g_res_art_size = g_res_thm_clus = g_res_thm_size = 0;
         g_res_album_clus = g_albums[i].clus;
         fat32_readdir(fs, g_albums[i].clus, resolve_art_cb, 0);
@@ -2138,10 +2197,15 @@ static void library_finish(void)
 static void library_ensure(fat32_t *fs)
 {
     if (g_lib_scanned) return;
+    /* Time the whole load and surface it on About. This is the one long wait at
+     * boot and it is dominated by disk seeks, so it is worth being able to see
+     * whether a change actually helped instead of judging it by feel. */
+    uint32_t t0 = mmio_read32(USEC_TIMER_ADDR);
     load_bar("Loading Library", 0);       /* the load phases fill this in */
     if (!library_load_index(fs))          /* host-built CORELIB.IDX */
         library_scan(fs);                  /* fallback: per-file tag scan     */
     build_artists();                       /* so About/Artists count is live */
+    g_lib_load_ms = (mmio_read32(USEC_TIMER_ADDR) - t0) / 1000u;
 }
 
 /* Populate g_songview with the songs to show (genre < 0 = all), title-ordered. */
@@ -2471,6 +2535,19 @@ static void settings_render_cur(void)
             ui_text_centered(80, "Library too large " UI_GLYPH_MIDDOT
                                  " some items not shown",
                              FONT_SMALL, BATT_LOW_RED);
+        } else if (g_lib_load_ms) {
+            /* Boot library load time. The one long wait at startup, and it is
+             * seek-bound, so having the number on screen is what makes a change
+             * here verifiable rather than a matter of impression. */
+            char lt[28];
+            int  k = 0;
+            for (const char *q = "Library loaded in "; *q; q++) lt[k++] = *q;
+            k += u32_to_dec(lt + k, g_lib_load_ms / 1000u);
+            lt[k++] = '.';
+            lt[k++] = (char)('0' + (g_lib_load_ms / 100u) % 10u);
+            lt[k++] = 's';
+            lt[k]   = '\0';
+            ui_text_centered(80, lt, FONT_SMALL, LINEN_MUTED_D);
         }
     } else {
         settings_render(g_set_screen, &g_settings, g_set_sel);
