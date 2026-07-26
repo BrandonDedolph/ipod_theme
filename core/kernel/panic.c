@@ -39,34 +39,36 @@ extern uint32_t _stack_top[];
 
 void stack_stat(stack_stat_t *st)
 {
-    uint32_t *lo = _stack_limit;
-    uint32_t *hi = _stack_top;
-    uint32_t  sp;
+    uint32_t sp;
 
     __asm__ volatile("mov %0, sp" : "=r"(sp));
 
-    st->limit = (uint32_t)(uintptr_t)lo;
-    st->top   = (uint32_t)(uintptr_t)hi;
+    st->limit = (uint32_t)(uintptr_t)_stack_limit;
+    st->top   = (uint32_t)(uintptr_t)_stack_top;
     st->size  = st->top - st->limit;
     st->sp    = sp;
 
     /* Walk up from the floor through the boot paint; the first word that is
      * no longer STACK_PAINT_WORD is the deepest the stack has ever reached.
-     * Bounded by the region (the loop cannot pass `hi`). */
-    uint32_t *p = lo;
-    while (p < hi && *p == STACK_PAINT_WORD) {
-        p++;
+     * Bounded by the region (the loop cannot pass the top). Addresses are
+     * compared as integers and loads are volatile: the paint is written by
+     * crt0.S, which the compiler cannot see, and these are linker symbols
+     * rather than C objects — no provenance assumptions to trip over. */
+    uint32_t addr = st->limit;
+    while (addr < st->top &&
+           *(volatile const uint32_t *)(uintptr_t)addr == STACK_PAINT_WORD) {
+        addr += 4u;
     }
-    st->used_peak = st->top - (uint32_t)(uintptr_t)p;
+    st->used_peak = st->top - addr;
     st->free_min  = st->size - st->used_peak;
     st->breached  = (uint32_t)(stack_guard_breached() != 0);
 }
 
 int stack_guard_breached(void)
 {
-    const uint32_t *lo = _stack_limit;
-    for (uint32_t i = 0; i < STACK_GUARD_WORDS; i++) {
-        if (lo[i] != STACK_PAINT_WORD) {
+    uint32_t addr = (uint32_t)(uintptr_t)_stack_limit;
+    for (uint32_t i = 0; i < STACK_GUARD_WORDS; i++, addr += 4u) {
+        if (*(volatile const uint32_t *)(uintptr_t)addr != STACK_PAINT_WORD) {
             return 1;
         }
     }
