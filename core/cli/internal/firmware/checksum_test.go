@@ -2,15 +2,75 @@ package firmware
 
 import (
 	"bytes"
+	"encoding/binary"
+	"os"
 	"testing"
 )
 
 func TestChecksum_EmptyImage(t *testing.T) {
 	// Empty image: sum is just the model seed.
+	//
+	// Note this test, and every other one in this file, only proves the
+	// arithmetic is self-consistent — they assert 0x05 against 0x05. The
+	// question of whether 0x05 is the *right* seed is answered only by
+	// TestChecksumGoldenVector below.
 	got := Checksum(ModelIPodVideo, nil)
 	want := uint32(0x05)
 	if got != want {
 		t.Errorf("Checksum(empty) = %#x, want %#x", got, want)
+	}
+}
+
+// TestChecksumGoldenVector re-derives the model seed from a real
+// .ipod file rather than restating our own assumption.
+//
+// Point it at any genuine .ipod image:
+//
+//	CORE_GOLDEN_IPOD=/path/to/rockbox.ipod go test ./internal/firmware/
+//
+// The most useful vector is one this project did not produce — a
+// Rockbox build for the iPod Video, say — because that makes it
+// independent corroboration rather than a round trip through our own
+// encoder. The file is read from wherever the developer has it; nothing
+// third-party is vendored into the repo, which also keeps a GPL-2
+// artifact out of an Apache-2.0 tree.
+//
+// Verified this way at the time of writing (see the provenance note on
+// ModelIPodVideo in checksum.go): a Rockbox rockbox.ipod with a
+// 777976-byte payload and this project's own core.ipod with a
+// 225388-byte payload both yield a seed of exactly 5 for model "ipvd".
+func TestChecksumGoldenVector(t *testing.T) {
+	path := os.Getenv("CORE_GOLDEN_IPOD")
+	if path == "" {
+		t.Skip("set CORE_GOLDEN_IPOD=/path/to/a/real.ipod to check the model seed " +
+			"against a golden vector (a third-party build, e.g. rockbox.ipod, is best)")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden vector: %v", err)
+	}
+	if len(data) <= IPodFileHeaderSize {
+		t.Fatalf("%s is too small to be a .ipod file (%d bytes)", path, len(data))
+	}
+	stored := binary.BigEndian.Uint32(data[0:4])
+	var name ModelName
+	copy(name[:], data[4:8])
+	image := data[IPodFileHeaderSize:]
+
+	want, ok := ModelNumForName(name)
+	if !ok {
+		t.Skipf("%s has model name %q, which we have no seed for", path, string(name[:]))
+	}
+	// Derive the seed the file implies and compare with our constant.
+	derived := stored - Checksum(0, image)
+	if ModelNum(derived) != want {
+		t.Errorf("%s (model %q, %d payload bytes): file implies seed %#x, "+
+			"but ModelNumForName says %#x — one of them is wrong, and the constant "+
+			"is the one that has never been exercised on hardware",
+			path, string(name[:]), len(image), derived, want)
+	}
+	if got := Checksum(want, image); got != stored {
+		t.Errorf("%s: computed checksum %#08x, file stores %#08x", path, got, stored)
 	}
 }
 

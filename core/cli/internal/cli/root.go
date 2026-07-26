@@ -20,6 +20,13 @@ func Root() *cobra.Command {
 		SilenceErrors: true,
 	}
 
+	// Global device selector. internal/ipod already defines
+	// ErrMultipleDevices ("specify which one") with no way for the user
+	// to do the specifying; this is that way. Read it with deviceFlag.
+	root.PersistentFlags().String("device", "",
+		"Target a specific iPod: OS block-device path (/dev/sdX, /dev/diskN, "+
+			"\\\\.\\PhysicalDriveN) or serial number. Required when more than one is connected.")
+
 	root.AddCommand(
 		newBuildCmd(),
 		newSimCmd(),
@@ -36,6 +43,17 @@ func Root() *cobra.Command {
 	)
 
 	return root
+}
+
+// deviceFlag returns the value of the global --device selector, or ""
+// when the user didn't pass one. Defined here so no command grows its
+// own private copy of the flag.
+func deviceFlag(cmd *cobra.Command) string {
+	v, err := cmd.Flags().GetString("device")
+	if err != nil {
+		return ""
+	}
+	return v
 }
 
 const longDescription = `core is the host-side CLI for the custom iPod Video firmware project.

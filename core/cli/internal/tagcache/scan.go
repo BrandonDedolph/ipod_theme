@@ -27,9 +27,15 @@ type SongInfo struct {
 // Scan walks `dir` recursively for .flac/.mp3 files (case-insensitive)
 // and parses tags via dhowden/tag. Files we can't open or parse are
 // silently skipped — the user gets a row with the basename-as-title
-// instead of an outright failure, matching the firmware's runtime
-// behavior in tagcache.c. Real-world libraries are nearly always nested
-// by artist/album, so recursion is the default; there is no flat mode.
+// instead of an outright failure. Real-world libraries are nearly always
+// nested by artist/album, so recursion is the default; there is no flat
+// mode.
+//
+// Note what SongInfo does *not* carry: duration, track number, disc
+// number, and the normalized-name hashes the firmware uses to locate a
+// file. CIDX (the format the device actually reads) requires all four,
+// so this scanner could not produce a device-loadable index even if the
+// encoder targeted CIDX. See README.md in this directory.
 //
 // Subtrees that error mid-walk (permission denied, vanished while we
 // were iterating) are skipped rather than failing the whole scan: the
@@ -93,9 +99,9 @@ func dedupeSongs(songs []SongInfo) []SongInfo {
 	seen := make(map[string]seenEntry, len(songs))
 	out := songs[:0]
 	for _, s := range songs {
-		title  := strings.ToLower(strings.TrimSpace(s.Title))
+		title := strings.ToLower(strings.TrimSpace(s.Title))
 		artist := strings.ToLower(strings.TrimSpace(s.Artist))
-		album  := strings.ToLower(strings.TrimSpace(s.Album))
+		album := strings.ToLower(strings.TrimSpace(s.Album))
 		var key string
 		if title == "" || artist == "" || album == "" {
 			/* Untagged or partially-tagged files: don't risk

@@ -1,8 +1,32 @@
+// Firmware-partition directory support.
+//
+// STATUS: INCOMPLETE SCAFFOLDING. Nothing outside this package's tests
+// calls any of it, and it does not yet cover everything a partition
+// write would need. Specifically:
+//
+//   - IMPLEMENTED: the 40-byte directory entry codec, the directory
+//     marker at 0x100, and the directory locator (format version at
+//     0x10A, first entry at LE32@0x104 + 0x200) per
+//     core/docs/hw/08-boot-dock.md.
+//
+//   - NOT IMPLEMENTED: the Apple partition preamble. The first 512
+//     bytes of partition 0 carry the Apple copyright banner, the boot
+//     ROM refuses to load a partition without it, and any install path
+//     must preserve it byte-exact. This package neither parses nor
+//     validates it, and cannot supply one — the only copy of a given
+//     device's preamble is the one on that device, which is why the
+//     install safety checklist (internal/cli/install.go) requires a
+//     full partition backup before any write.
+//
+// Do not describe this file as "done" until the preamble is handled and
+// something outside the tests uses it.
+
 package firmware
 
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -93,4 +117,80 @@ func CheckDirectoryMarker(b [4]byte) error {
 		return ErrBadDirectoryMarker
 	}
 	return nil
+}
+
+// Byte offsets within the firmware partition, per
+// core/docs/hw/08-boot-dock.md.
+const (
+	// DirectoryMarkerOffset is where the "]ih[" marker lives.
+	DirectoryMarkerOffset = 0x100
+	// DirectoryStartPtrOffset holds an LE32 that, plus DirectoryStartBias,
+	// gives the offset of the first directory entry.
+	DirectoryStartPtrOffset = 0x104
+	// DirectoryVersionOffset holds the LE16 directory format version.
+	DirectoryVersionOffset = 0x10A
+	// DirectoryStartBias is added to the LE32 at DirectoryStartPtrOffset.
+	DirectoryStartBias = 0x200
+	// directoryHeaderEnd is the first byte past the fields we read.
+	directoryHeaderEnd = 0x10C
+)
+
+// KnownDirectoryVersions are the directory format versions the iPod 5G
+// boot ROM recognizes. Only 2 and 3 are seen in the wild for this device.
+var KnownDirectoryVersions = []uint16{2, 3}
+
+// ErrShortPartition is returned when the supplied bytes don't reach the
+// directory header.
+var ErrShortPartition = errors.New("firmware partition: too short to contain a directory header")
+
+// ErrUnknownDirectoryVersion is returned for a directory format version
+// outside KnownDirectoryVersions.
+var ErrUnknownDirectoryVersion = errors.New("firmware partition: unrecognized directory format version")
+
+// DirectoryLocator is the result of parsing the directory header: where
+// the image directory starts and which format version it is in.
+type DirectoryLocator struct {
+	// Version is the LE16 directory format version at 0x10A.
+	Version uint16
+	// Start is the absolute byte offset, within the firmware partition,
+	// of the first 40-byte directory entry.
+	Start uint32
+}
+
+// ReadDirectoryLocator parses the directory header out of the leading
+// bytes of a firmware partition. `part` needs to contain at least the
+// first directoryHeaderEnd bytes; passing the whole partition is fine.
+//
+// It verifies the marker, reads the LE32 at 0x104 and adds the 0x200
+// bias to get the directory start, and reads the LE16 version at 0x10A.
+// An unrecognized version is reported but the locator is still returned,
+// so a caller inspecting an odd device can see what it found.
+func ReadDirectoryLocator(part []byte) (DirectoryLocator, error) {
+	if len(part) < directoryHeaderEnd {
+		return DirectoryLocator{}, fmt.Errorf("%w (have %d bytes, need %d)",
+			ErrShortPartition, len(part), directoryHeaderEnd)
+	}
+	var marker [4]byte
+	copy(marker[:], part[DirectoryMarkerOffset:DirectoryMarkerOffset+4])
+	if err := CheckDirectoryMarker(marker); err != nil {
+		return DirectoryLocator{}, fmt.Errorf("%w (found %q at %#x)",
+			err, string(marker[:]), DirectoryMarkerOffset)
+	}
+	start := binary.LittleEndian.Uint32(part[DirectoryStartPtrOffset : DirectoryStartPtrOffset+4])
+	loc := DirectoryLocator{
+		Version: binary.LittleEndian.Uint16(part[DirectoryVersionOffset : DirectoryVersionOffset+2]),
+		Start:   start + DirectoryStartBias,
+	}
+	if start+DirectoryStartBias < start {
+		return DirectoryLocator{}, fmt.Errorf(
+			"firmware partition: directory start pointer %#x overflows when biased by %#x",
+			start, DirectoryStartBias)
+	}
+	for _, v := range KnownDirectoryVersions {
+		if loc.Version == v {
+			return loc, nil
+		}
+	}
+	return loc, fmt.Errorf("%w: %d (known: %v)",
+		ErrUnknownDirectoryVersion, loc.Version, KnownDirectoryVersions)
 }
