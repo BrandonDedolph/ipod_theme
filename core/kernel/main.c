@@ -822,7 +822,7 @@ static ui_window_t g_lock_flash;
  * once the wheel goes quiet (SCRUB_COMMIT_US), which is also what makes a long
  * drag across a track cost exactly one seek.
  */
-#define SCRUB_COMMIT_US  600000u     /* wheel quiet this long -> perform seek  */
+#define SCRUB_COMMIT_US  400000u     /* wheel quiet this long -> perform seek  */
 #define SCRUB_EXIT_US   4000000u     /* ...and this long -> back to volume     */
 #define SCRUB_STEP_S          5      /* seconds per detent at rest             */
 

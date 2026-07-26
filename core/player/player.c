@@ -336,9 +336,9 @@ static int decode_chunk(uint32_t max_frames)
     return got;
 }
 
-static void decode_pump(void)
+static void decode_pump_upto(uint32_t want)
 {
-    while (!g_eos && pcm_ring_fill(&g_ring) < PRIME_FRAMES &&
+    while (!g_eos && pcm_ring_fill(&g_ring) < want &&
            pcm_ring_free(&g_ring) >= DECODE_FRAMES) {
         int got = decode_chunk(DECODE_FRAMES);
         if (got <= 0) {
@@ -348,6 +348,28 @@ static void decode_pump(void)
         g_written += pcm_ring_write(&g_ring, decode_buf, (uint32_t)got);
     }
 }
+
+static void decode_pump(void)
+{
+    decode_pump_upto(PRIME_FRAMES);
+}
+
+/*
+ * How much must be in the ring before the DAC may be restarted after a SEEK.
+ *
+ * Not PRIME_FRAMES. A track START can afford to buffer 1.49 s because nobody is
+ * waiting on a specific moment — but after a seek the user is waiting to hear
+ * the place they just aimed at, and 1.49 s of decode (plus the disk refill, plus
+ * a FAT rewind on a backward jump) is the "takes a bit to load" they feel.
+ *
+ * The real floor is what hal_audio_start() immediately pulls out of the ring to
+ * fill both ping-pong buffers: 2 x AUDIO_FRAMES_PER_BUF. Three buffers' worth
+ * leaves a full buffer of slack for the first completion ISR, and the ordinary
+ * play-loop pump takes the ring the rest of the way up to PRIME_FRAMES while
+ * the audio is already running — so the anti-skip depth is restored within a
+ * second, it just is not on the critical path to first sound any more.
+ */
+#define SEEK_PRIME_FRAMES (3u * 8192u)   /* ~557 ms at 44.1 kHz */
 
 /* Decode at most ONE chunk into the ring, then return. Used inside the play
  * loop so decoding never monopolizes the loop: however slow the codec is (a
@@ -1294,7 +1316,9 @@ int player_seek_to(uint32_t sec)
     g_boundary       = 0;
     g_eos            = 0;
     g_prefetch_tried = 0;
-    decode_pump();                       /* re-prime before audio resumes */
+    /* Only enough to restart cleanly — the play loop fills the rest while the
+     * audio runs, so first sound is not gated on the full anti-skip depth. */
+    decode_pump_upto(SEEK_PRIME_FRAMES);
     g_pl_start_us = mmio_read32(USEC_TIMER_ADDR) - sec * 1000000u;
     g_pl_low_fill = RING_FRAMES;
     if (!was_paused) {
