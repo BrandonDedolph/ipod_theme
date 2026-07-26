@@ -7,6 +7,7 @@
 #include "piezo.h"
 #include "mmio.h"
 #include "pp5022.h"          /* DEV_INIT1_ADDR, DEV_EN_ADDR, USEC_TIMER_ADDR */
+#include "irqlock.h"         /* DEV_INIT1/DEV_EN RMW vs the timer ISR */
 
 /* PWM facts not already in pp5022.h. DEV_PWM is DEV_EN bit 17, one above
  * DEV_OPTO (bit 16, the clickwheel). Addresses are hardware facts. */
@@ -30,9 +31,14 @@
 
 void piezo_init(void)
 {
-    /* Route PWM0 to the piezo pin, then enable its peripheral clock. */
+    /* Route PWM0 to the piezo pin, then enable its peripheral clock. Both are
+     * read-modify-writes of registers the timer ISR also touches (the wheel's
+     * OPTO gate lives in DEV_EN, its button latch in DEV_INIT1), so the pair is
+     * IRQ-masked — see irqlock.h. */
+    uint32_t f = hw_irq_save();
     mmio_write32(DEV_INIT1_ADDR, mmio_read32(DEV_INIT1_ADDR) & ~DEV_INIT1_PWM_RT);
     mmio_write32(DEV_EN_ADDR,    mmio_read32(DEV_EN_ADDR) | DEV_EN_PWM);
+    hw_irq_restore(f);
     mmio_write32(PWM0_CTRL_ADDR, 0);
 }
 

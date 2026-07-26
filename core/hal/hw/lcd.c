@@ -91,6 +91,86 @@
  * the initial lcd_fill skips the wait-for-idle read entirely. */
 static int lcd_first_frame = 1;
 
+/* ---------------------------------------------------------------------------
+ * Failure reporting.
+ *
+ * Every BCM handshake here exhausts its spin budget and then performs the
+ * access anyway, and all of them return void — so a wedged BCM produced
+ * corrupt frames with no signal of any kind, anywhere. The commit path now
+ * returns a status, counts exhaustions, and narrates them over the debug UART.
+ *
+ * The warning is RATE-LIMITED: a stuck BCM fails on every frame, and a warning
+ * per frame would both flood the console and, at 115200 baud, add milliseconds
+ * of blocking UART time to each present — turning a display glitch into a
+ * playback glitch. One line per second is enough to diagnose.
+ *
+ * uart_puts is declared weak because the host golden-trace tests link lcd.c on
+ * its own; there it resolves to NULL and the call is skipped.
+ * ------------------------------------------------------------------------- */
+__attribute__((weak)) void uart_puts(const char *s);
+
+#define LCD_WARN_INTERVAL_US  1000000u
+
+static uint32_t lcd_timeouts;       /* total budget exhaustions since boot */
+static uint32_t lcd_warn_last_us;
+static int      lcd_warn_seen;
+
+static void lcd_warn(const char *msg)
+{
+    if (!uart_puts) {
+        return;
+    }
+    uint32_t now = mmio_read32(USEC_TIMER_ADDR);
+    if (lcd_warn_seen &&
+        (uint32_t)(now - lcd_warn_last_us) < LCD_WARN_INTERVAL_US) {
+        return;
+    }
+    lcd_warn_seen   = 1;
+    lcd_warn_last_us = now;
+    uart_puts(msg);
+}
+
+uint32_t lcd_bcm_timeouts(void)
+{
+    return lcd_timeouts;
+}
+
+/* ---------------------------------------------------------------------------
+ * Wall-clock waits, for the panel sleep/wake paths only.
+ *
+ * The ordinary commit path counts POLL TRIPS, which is fine when the answer
+ * arrives in microseconds. It is useless for the one case that takes hundreds
+ * of milliseconds: 02-lcd.md ("LCD update protocol") records that after waking
+ * from sleep the BCM's FIRST update can take up to 500 ms, because it is doing
+ * internal LCD panel init. Poll trips cannot express that; the microsecond
+ * counter can.
+ * ------------------------------------------------------------------------- */
+#define BCM_LCDINIT_TIMEOUT_US  600000u   /* > the documented 500 ms panel init */
+#define BCM_SLEEP_DRAIN_US      200000u   /* in-flight update before LCD_SLEEP  */
+#define BCM_PANEL_SETTLE_US      20000u   /* panel-enable bits to take effect   */
+
+#ifdef MMIO_MOCK
+#define BCM_WALL_GUARD_TRIPS  4u
+#else
+#define BCM_WALL_GUARD_TRIPS  (1u << 24)
+#endif
+
+/* Bounded busy-wait on the microsecond counter. */
+static void bcm_wall_delay(uint32_t us)
+{
+    uint32_t t0    = mmio_read32(USEC_TIMER_ADDR);
+    uint32_t guard = BCM_WALL_GUARD_TRIPS;
+    while ((uint32_t)(mmio_read32(USEC_TIMER_ADDR) - t0) < us && --guard != 0) {
+        /* wait */
+    }
+}
+
+/* Panel-slept flag: while set, NOTHING may stream pixels (see lcd_sleep). */
+static int lcd_slept;
+
+/* Set by lcd_wake: the next commit must absorb the long panel-init update. */
+static int lcd_post_wake;
+
 /* Set the BCM-internal write destination: 32-bit address store to the
  * write-address port, then poll write-ready (02-lcd.md, write
  * handshake; verified against Rockbox lcd-video.c, 2026-06-11). */
@@ -192,9 +272,50 @@ static void bcm_frame_begin(void)
  *  (5) Strobe execute. Bootloader variant: return without a completion
  *      wait; the next frame's pre-stream wait catches any overrun.
  */
-static void bcm_frame_commit(void)
+/*
+ * Wait for an in-flight LCD_UPDATE to retire, bounded by WALL CLOCK and with
+ * NO re-kick. Used for the two long-latency cases (the first update after a
+ * panel wake, and draining before LCD_SLEEP). Returns 0 if it went idle.
+ */
+static int bcm_wait_idle_wall(uint32_t us)
 {
-    if (!lcd_first_frame) {
+    uint32_t t0    = mmio_read32(USEC_TIMER_ADDR);
+    uint32_t guard = BCM_WALL_GUARD_TRIPS;
+    uint32_t stat  = bcm_read32(BCMA_COMMAND);
+
+    while ((stat == BCMCMD_LCD_UPDATE || stat == 0xFFFF) && --guard != 0) {
+        if ((uint32_t)(mmio_read32(USEC_TIMER_ADDR) - t0) > us) {
+            return -1;
+        }
+        stat = bcm_read32(BCMA_COMMAND);
+    }
+    return guard != 0 ? 0 : -1;
+}
+
+static int bcm_frame_commit(void)
+{
+    int rc = 0;
+
+    if (lcd_post_wake) {
+        /*
+         * FIRST COMMIT AFTER A PANEL WAKE. 02-lcd.md: this update can take up
+         * to 500 ms because the BCM is running internal LCD panel init. The
+         * ordinary path below budgets BCM_IDLE_SPIN_LIMIT (512 polls, on the
+         * order of milliseconds) and RE-KICKS LCD_UPDATE up to
+         * BCM_IDLE_SPIN_LIMIT/BCM_REKICK_TRIPS times inside that window — so
+         * it hammers new update commands into a BCM that is mid-panel-init,
+         * and later presents stream fresh pixels into the same in-progress
+         * init. That is how the BCM ends up permanently latched: the screen
+         * wakes to solid white and only a reboot recovers, because we have no
+         * bcm_init() to bootstrap it back.
+         *
+         * So the post-wake commit ABSORBS instead: a wall-clock window wider
+         * than the documented panel-init time, and NO re-kick. Re-kicking is
+         * the failure mechanism here, not the cure.
+         */
+        rc = bcm_wait_idle_wall(BCM_LCDINIT_TIMEOUT_US);
+        lcd_post_wake = 0;
+    } else if (!lcd_first_frame) {
         uint32_t spin = BCM_IDLE_SPIN_LIMIT;
         uint32_t kick = BCM_REKICK_TRIPS;
         uint32_t stat = bcm_read32(BCMA_COMMAND);
@@ -210,11 +331,20 @@ static void bcm_frame_commit(void)
             }
             stat = bcm_read32(BCMA_COMMAND);
         }
+        if (spin == 0) {
+            rc = -1;
+        }
     }
     lcd_first_frame = 0;
 
     bcm_write32(BCMA_COMMAND, BCMCMD_LCD_UPDATE);
     mmio_write16(BCM_CONTROL_ADDR, BCM_CONTROL_STROBE);
+
+    if (rc != 0) {
+        lcd_timeouts++;
+        lcd_warn("lcd: BCM idle-wait timed out (frames may be corrupt)\n");
+    }
+    return rc;
 }
 
 /* Byte stride of one framebuffer row in BCM-internal memory: LCD_WIDTH
@@ -254,6 +384,10 @@ void lcd_fill(uint16_t rgb565)
      * high/low ordering (see lcd_present) is irrelevant here. */
     const uint32_t pair = ((uint32_t)rgb565 << 16) | rgb565;
     uint32_t n = BCM_FRAME_WORDS;
+
+    if (lcd_slept) {
+        return;      /* panel is asleep — never stream into a powering-down BCM */
+    }
 
     /* ONLY the pixel stream must be uninterrupted: an ISR stalling the push
      * mid-stream makes the BCM abort the frame. So mask just the stream — NOT
@@ -308,6 +442,13 @@ void lcd_fill(uint16_t rgb565)
  */
 void lcd_present_rect(const uint16_t *fb, int x, int y, int w, int h)
 {
+    /* Panel asleep: refuse. Streaming pixels while the BCM is sleeping — or
+     * while it is running the panel init that follows a wake — is what latches
+     * it permanently (see lcd_sleep / bcm_frame_commit). */
+    if (lcd_slept) {
+        return;
+    }
+
     /* Validate + clamp to the panel. Trim a partially off-screen rect;
      * bail on anything with no on-screen area. */
     if (w <= 0 || h <= 0) {
@@ -401,18 +542,67 @@ void lcd_present_fb(const uint16_t *fb)
 
 void lcd_sleep(void)
 {
+    if (lcd_slept) {
+        return;
+    }
+
+    /*
+     * Drain first. Issuing LCD_SLEEP on top of an LCD_UPDATE that is still in
+     * flight leaves the BCM holding two commands, and the sleep is what the
+     * panel-init on the other side of the wake has to unwind. Bounded by wall
+     * clock, unmasked (this polls the BCM and touches no pixels, so the audio
+     * ISR is free to preempt it); if it does not retire we proceed anyway and
+     * say so, because refusing to sleep is worse than sleeping untidily.
+     */
+    if (bcm_wait_idle_wall(BCM_SLEEP_DRAIN_US) != 0) {
+        lcd_timeouts++;
+        lcd_warn("lcd: BCM still busy at sleep\n");
+    }
+
     LCD_IRQ_ENTER();
     bcm_write32(BCM_PANEL_CTL_ADDR,
                 bcm_read32(BCM_PANEL_CTL_ADDR) & ~BCM_PANEL_CTL_ENABLE);
     bcm_write32(BCMA_COMMAND, BCMCMD_LCD_SLEEP);
     mmio_write16(BCM_CONTROL_ADDR, BCM_CONTROL_STROBE);
     LCD_IRQ_EXIT();
+
+    /*
+     * Latch the slept state BEFORE anyone can present again. While it is set,
+     * lcd_fill / lcd_present_rect refuse to stream: pushing a ~150 KB pixel
+     * stream at a panel that is powering down (or, worse, into the panel-init
+     * on the way back up) is exactly what wedges the BCM.
+     */
+    lcd_slept = 1;
+    bcm_wall_delay(BCM_PANEL_SETTLE_US);
 }
 
 void lcd_wake(void)
 {
+    if (!lcd_slept) {
+        return;
+    }
     LCD_IRQ_ENTER();
     bcm_write32(BCM_PANEL_CTL_ADDR,
                 bcm_read32(BCM_PANEL_CTL_ADDR) | BCM_PANEL_CTL_ENABLE);
     LCD_IRQ_EXIT();
+
+    /* Let the panel-enable bits take effect before the caller presents. */
+    bcm_wall_delay(BCM_PANEL_SETTLE_US);
+
+    lcd_slept     = 0;
+    /*
+     * Arm the absorb window. The NEXT commit is the one the BCM answers
+     * slowly (up to 500 ms of internal panel init, 02-lcd.md) and it must not
+     * be re-kicked — see bcm_frame_commit. Note for callers: the backlight
+     * should not be brought up until that first present has returned, or the
+     * user sees the panel-init as a white flash (02-lcd.md: "If we wake the
+     * backlight before the first update completes, the user sees a 500 ms
+     * white flash").
+     */
+    lcd_post_wake = 1;
+}
+
+int lcd_is_slept(void)
+{
+    return lcd_slept;
 }

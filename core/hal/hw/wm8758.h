@@ -83,12 +83,24 @@
 /* ---- CLKCTRL (0x06) ------------------------------------------------- */
 #define CLKCTRL_MS             0x001  /* codec is I2S clock master */
 #define CLKCTRL_BCLKDIV_2      0x004
-#define CLKCTRL_MCLKDIV_2      0x040
+/* MCLKDIV occupies bits 7:5; the datasheet's R6 MCLKDIV[2:0] encoding is
+ * 000=/1 001=/1.5 010=/2 011=/3 100=/4 101=/6 110=/8 111=/12. Only the
+ * dividers our supported rates need are spelled out (05-audio.md gives the
+ * /2 case as CLKCTRL_MCLKDIV_2 = 0x040, which pins the field position). */
+#define CLKCTRL_MCLKDIV_2      0x040  /* 2<<5: SYSCLK = fPLLOUT/2 */
+#define CLKCTRL_MCLKDIV_3      0x060  /* 3<<5: SYSCLK = fPLLOUT/3 */
+#define CLKCTRL_MCLKDIV_4      0x080  /* 4<<5: SYSCLK = fPLLOUT/4 */
 #define CLKCTRL_CLKSEL         0x100  /* clock source = PLL */
 
-/* ---- ADDCTRL (0x07) — SR is a filter-class hint, not the real rate -- */
+/* ---- ADDCTRL (0x07) — SR is a filter-class hint, not the real rate --
+ * SR[2:0] sits in bits 3:1; datasheet R7 encoding 000=48k 001=32k 010=24k
+ * 011=16k 100=12k 101=8k. The true rate comes from the PLL + MCLKDIV, so
+ * the 44.1 kHz family legitimately reuses its nearest class (05-audio.md,
+ * "ADDCTRL_SR is a filter-class hint, not the real rate"). */
 #define ADDCTRL_SLOWCLKEN      0x001
 #define ADDCTRL_SR_48kHz       0x000
+#define ADDCTRL_SR_32kHz       0x002
+#define ADDCTRL_SR_24kHz       0x004
 
 /* ---- DACCTRL (0x0A) ------------------------------------------------- */
 #define DACCTRL_DACOSR128      0x008  /* 128x oversample (the "unmuted" state) */
@@ -150,17 +162,62 @@
                         CLKCTRL_BCLKDIV_2 | CLKCTRL_MS)                     /* 0x145 */
 #define WM_ADDCTRL_44  (ADDCTRL_SR_48kHz | ADDCTRL_SLOWCLKEN)              /* 0x001 */
 
+/* ---- PLL presets: the two operating points (05-audio.md, "DAC sample-rate
+ * setup" + the numeric appendix). Both run from a 12 MHz reference (the SoC
+ * feeds 24 MHz; PLLPRESCALE halves it). SYSCLK = fPLLOUT / MCLKDIV must land
+ * on exactly 256 x the sample rate.
+ *
+ *   preset 0: fPLLOUT = 22.5792 MHz  -> the 44.1 kHz family (44.1 / 22.05)
+ *   preset 1: fPLLOUT = 24.576  MHz  -> the 48 kHz family (48 / 32 / 24)
+ *
+ * Preset 0's coefficients are the resolved 44.1 kHz sequence; preset 1's are
+ * the 48 kHz preset recorded alongside it (PLLN=0x18, K1=0x0C, K2=0x93,
+ * K3=0xE9). */
+#define WM_PLLN_48     (PLLN_PLLPRESCALE | 0x8)                             /* 0x18 */
+#define WM_PLLK1_48    0x0C
+#define WM_PLLK2_48    0x93
+#define WM_PLLK3_48    0xE9
+
 /* ---- Codec driver API (wm8758.c) ------------------------------------
  * Requires the SoC I2C controller to be initialised first (i2c_init).
- * wm8758_init brings the codec fully up for 44.1 kHz I2S playback: power
- * rails, I2S 16-bit format, DAC PLL, DAC->output routing, and unmute at a
- * moderate volume. Pure register writes (no CPU-timed delays), so a
- * caller wanting a VMID settle before the first sample inserts its own.
+ * wm8758_init brings the codec fully up for I2S playback at the rate chosen
+ * by wm8758_set_rate (44.1 kHz by default): power rails, I2S 16-bit format,
+ * DAC PLL, DAC->output routing, and unmute. It now supplies the datasheet's
+ * VMID settle itself (a USEC_TIMER wait between the 10k fast-charge and the
+ * 500k hold) rather than leaving it to a caller that never did it.
  */
 #ifndef __ASSEMBLER__
 #include <stdbool.h>
+#include <stdint.h>
 
-void wm8758_init(void);
+/*
+ * Select the sample rate the NEXT wm8758_init() will program. Accepts the
+ * rates in the PLL preset table (44100, 48000, 32000, 24000, 22050); anything
+ * else is rejected and the previous selection stands. Returns 0 on success,
+ * -1 if the rate is unsupported. Defaults to 44100 until called.
+ *
+ * Split from wm8758_init (rather than made a parameter) so the codec bring-up
+ * keeps its zero-argument shape.
+ */
+int wm8758_set_rate(uint32_t sample_rate);
+
+/*
+ * Register a callback invoked at the very END of wm8758_init(), after the
+ * unmute. hal/hw/audio.c points this at hal_codec_restore() so the user's
+ * volume/balance/bass/treble survive the full WM_RESET that starts every
+ * per-track bring-up. NULL (the default) disables it.
+ */
+void wm8758_set_restore(void (*fn)(void));
+
+/*
+ * Bring the codec up. Returns the number of control writes that FAILED
+ * (0 = the whole sequence was accepted). See wm8758.c for what that number
+ * can actually detect: the PP502x controller has no per-byte NAK status, so
+ * the only observable failure is a wedged bus (BUSY never clearing) — but
+ * that is precisely the case where playback would otherwise be silent with
+ * no indication anywhere.
+ */
+int  wm8758_init(void);
 void wm8758_mute(bool mute);
 
 /* Pop-suppressed power-down: mute, discharge VMID, drop all power rails. The

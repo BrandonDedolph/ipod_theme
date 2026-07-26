@@ -56,6 +56,26 @@ int  hal_balance_get(void);
 void hal_tone_set(int bass_db, int treble_db);
 
 /*
+ * Re-apply everything this driver owns — volume, balance, bass and treble —
+ * from its cached state, in one shot.
+ *
+ * WHY: hal_audio_init() runs once per TRACK, and its first act is a full
+ * codec WM_RESET, which returns every register here to a datasheet default
+ * (0 dB headphone gain, flat EQ on the inert ADC path). Volume used to be
+ * papered over by an external re-apply from the player; bass/treble had
+ * nothing at all, so the user's tone settings were silently wiped on every
+ * track change and every auto-advance. Worse, a track boundary could hand the
+ * listener 0 dB when they had dialled the volume down -- a hearing-safety
+ * problem, not a preferences one.
+ *
+ * wm8758_init() now calls this itself (via wm8758_set_restore), so the codec
+ * can never come up at a level the user did not choose. An external re-apply
+ * after hal_audio_init is therefore redundant but harmless -- it writes the
+ * same values.
+ */
+void hal_codec_restore(void);
+
+/*
  * Pure percent -> OUT1VOL data-word mapping (no side effects, no I2C).
  * Returns the 9-bit LOUT1VOL/ROUT1VOL data word WITHOUT the VU latch bit
  * (the caller ORs OUTVOL_VU onto the right-channel write). Exposed so the

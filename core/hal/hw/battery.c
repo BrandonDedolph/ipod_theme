@@ -61,6 +61,66 @@
 #define PMU_ADC_FULLSCALE_MV 6000
 #define PMU_ADC_BITS         10
 
+/*
+ * CONVERSION WAIT. i2c_send deliberately does not wait for its own completion
+ * (09-i2c.md: the write path lets the NEXT transaction's leading BUSY-wait
+ * cover it), so the old code strobed "start conversion" and immediately turned
+ * the bus around to read the result. Every reading was therefore at least one
+ * sample stale, and the first after boot could be whatever the result
+ * registers happened to hold.
+ *
+ * 06-power.md documents no conversion-ready bit anywhere in the PCF50605
+ * register set, so there is nothing to poll — a fixed wait is the only option.
+ * The doc's own cadence for this channel is "5 reads per 2 s", i.e. ~400 ms
+ * between samples, which tells us the conversion is expected to be far shorter
+ * than that but not how much shorter. 2 ms is comfortably above any plausible
+ * 10-bit SAR conversion time and is invisible next to a 400 ms poll interval.
+ *
+ * DEVICE-GATED: this needs confirming on hardware (watch that two consecutive
+ * reads after a sudden load change actually differ, rather than lagging).
+ *
+ * Implemented as a CPU-cycle loop scaled by the core clock, NOT a USEC_TIMER
+ * wait: the golden trace for battery_millivolts asserts the exact ordered bus
+ * transaction and nothing else, so an MMIO read in the middle of it would be a
+ * trace change.
+ */
+#define PMU_ADC_SETTLE_US    2000u
+#define PMU_SETTLE_CALIB_HZ  30000000u
+/* Cycles a volatile spin trip costs on ARM7TDMI (load/sub/store/cmp/branch),
+ * conservative-low so the wait errs long rather than short. */
+#define PMU_SETTLE_CYCLES    8u
+
+/* Current core frequency; weak so battery.c still links standalone in the host
+ * trace test (which has no kernel clock driver). Absent -> assume calibration. */
+__attribute__((weak)) uint32_t cpu_frequency(void);
+
+static void pmu_adc_settle(void)
+{
+    uint32_t hz = cpu_frequency ? cpu_frequency() : PMU_SETTLE_CALIB_HZ;
+    if (hz == 0u) {
+        hz = PMU_SETTLE_CALIB_HZ;
+    }
+    /* trips = us * MHz / cycles-per-trip */
+    volatile uint32_t trips =
+        PMU_ADC_SETTLE_US * (hz / 1000000u) / PMU_SETTLE_CYCLES;
+    while (trips-- != 0) {
+        /* wait for the conversion */
+    }
+}
+
+/*
+ * Plausibility clamp. The cell is a single Li-Ion: below the 3300 mV shutoff
+ * threshold the system is unstable, and above ~4200 mV is past a full charge —
+ * a reading outside that band is a bad sample (a stale/garbage result register,
+ * a bus glitch), not a battery state. Clamping keeps a bogus sample from
+ * driving the percent curve to 0% and triggering a spurious low-battery
+ * shutdown. Thresholds from 06-power.md, "Brown-out / low-battery shutdown"
+ * (battery_level_shutoff = 3300) and the 100% curve point (4180, rounded up to
+ * the cell's 4200 mV charge ceiling).
+ */
+#define PMU_MV_MIN  3300
+#define PMU_MV_MAX  4200
+
 /* ---------- Power-state GPIO bits (no I2C) -------------------------- */
 
 /* GPIOL input: main charger present is ACTIVE-LOW (bit clear = present);
@@ -121,6 +181,10 @@ int battery_millivolts(void)
         return -1;
     }
 
+    /* Let the conversion actually happen before latching the result — see
+     * PMU_ADC_SETTLE_US. There is no ready bit to poll (06-power.md). */
+    pmu_adc_settle();
+
     /* Read the two result bytes back (ADCS1 then auto-incremented ADCS2). */
     uint8_t data[PMU_ADC_RESULT_LEN];
     if (i2c_read(PMU_ADDR, PMU_ADCS1, data, PMU_ADC_RESULT_LEN) != 0) {
@@ -129,7 +193,15 @@ int battery_millivolts(void)
 
     /* Assemble the 10-bit sample and scale to millivolts. */
     int raw = ((int)data[0] << 2) | (data[1] & PMU_ADC_LOW_MASK);
-    return (raw * PMU_ADC_FULLSCALE_MV) >> PMU_ADC_BITS;
+    int mv  = (raw * PMU_ADC_FULLSCALE_MV) >> PMU_ADC_BITS;
+
+    /* Sanity-clamp to the cell's real operating band (see PMU_MV_MIN/MAX). */
+    if (mv < PMU_MV_MIN) {
+        mv = PMU_MV_MIN;
+    } else if (mv > PMU_MV_MAX) {
+        mv = PMU_MV_MAX;
+    }
+    return mv;
 }
 
 int battery_percent(void)

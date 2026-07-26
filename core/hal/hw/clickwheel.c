@@ -21,6 +21,7 @@
 
 #include "pp5022.h"
 #include "mmio.h"
+#include "irqlock.h"
 #include "clickwheel.h"
 
 /*
@@ -54,69 +55,74 @@ static volatile bool    s_hold_edge;     /* a hold transition is pending     */
 static volatile bool    s_hold_state;    /* hold state to report on that edge*/
 static volatile bool    s_armed;         /* service() is a no-op until init  */
 static volatile uint8_t s_btn_live;      /* current mapped buttons (held state) */
+static volatile bool    s_need_bringup;  /* ISR gated OPTO on; drain must reset it */
 
 /*
- * Tiny nestable critical section, mirroring kernel/irq.h
- * arch_irq_save/restore but kept local so this driver stays include-clean
- * (hal/hw is not on the kernel include path). The core-mask asm is ARMv4T
- * mrs/orr|bic/msr; it is compiled out under -DMMIO_MOCK so the host decode
- * test builds and runs unchanged (no IRQs to mask on the host).
+ * Nestable critical section (hw_irq_save/hw_irq_restore, hal/hw/irqlock.h).
+ * DEV_EN / DEV_RS / DEV_INIT1 are read-modify-written from BOTH this driver
+ * (in the timer ISR) and i2s.c / i2c.c / piezo.c (thread context), so every
+ * RMW of them on either side must be masked — see that header for the failure
+ * modes. Compiled out under -DMMIO_MOCK so the host decode test is unchanged.
  */
-static inline uint32_t cw_irq_save(void)
-{
-#ifndef MMIO_MOCK
-    uint32_t cpsr, tmp;
-    __asm__ volatile(
-        "mrs %0, cpsr\n\t"
-        "orr %1, %0, %2\n\t"
-        "msr cpsr_c, %1\n\t"
-        : "=&r"(cpsr), "=&r"(tmp)
-        : "i"(CPSR_I_BIT)
-        : "cc", "memory");
-    return cpsr & CPSR_I_BIT;   /* prior I-bit: 0 == IRQs were enabled */
-#else
-    return 0;
-#endif
-}
+#define cw_irq_save     hw_irq_save
+#define cw_irq_restore  hw_irq_restore
 
-static inline void cw_irq_restore(uint32_t saved)
+/*
+ * Clock-gate the wheel (OPTO) block on or off. This is the CHEAP half of the
+ * power sequence — one masked read-modify-write, no spin — so it is safe to
+ * call from the timer ISR. Gating the clock off is what makes the wheel feel
+ * dead while Hold is engaged.
+ */
+static void opto_gate(bool on)
 {
-#ifndef MMIO_MOCK
-    uint32_t cpsr, tmp;
-    __asm__ volatile(
-        "mrs %0, cpsr\n\t"
-        "bic %1, %0, %3\n\t"
-        "orr %1, %1, %2\n\t"
-        "msr cpsr_c, %1\n\t"
-        : "=&r"(cpsr), "=&r"(tmp)
-        : "r"(saved), "i"(CPSR_I_BIT)
-        : "cc", "memory");
-#else
-    (void)saved;
-#endif
+    uint32_t f = cw_irq_save();
+    if (on) {
+        mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) | DEV_OPTO);
+    } else {
+        mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) & ~DEV_OPTO);
+    }
+    cw_irq_restore(f);
 }
 
 /*
- * Power/clock-gate the wheel (OPTO) block on or off. On is the full
- * bring-up: clock-gate + reset pulse + button-latch enable + the two
- * config writes (03-clickwheel.md, "Initialization"). Off just drops the
- * DEV_OPTO clock — what makes the wheel feel dead while hold is engaged.
+ * The EXPENSIVE half: reset pulse + settle + button-latch enable + the two
+ * config writes (03-clickwheel.md, "Initialization"). The settle is a bounded
+ * busy-wait of CW_RESET_HOLD_SPIN volatile trips.
+ *
+ * THIS MUST NOT RUN IN INTERRUPT CONTEXT. It used to: clickwheel_service()
+ * (the 100 Hz tick sampler) called the combined opto_power(true) on a Hold
+ * RELEASE edge, so every un-hold spun ~4096 volatile iterations inside the ISR
+ * with IRQs masked at the core — blowing straight through the audio DMA
+ * completion deadline and stalling the tick itself. The sampler now only
+ * gates the clock and latches a "needs bring-up" flag; the mainline drain
+ * (clickwheel_get_event) runs this.
+ */
+static void opto_bringup(void)
+{
+    uint32_t f = cw_irq_save();
+    mmio_write32(DEV_RS_ADDR, mmio_read32(DEV_RS_ADDR) | DEV_OPTO);
+    cw_irq_restore(f);
+    for (volatile uint32_t i = 0; i < CW_RESET_HOLD_SPIN; i++) {
+        /* hold reset (~udelay(5)) — outside the mask: no shared state */
+    }
+    f = cw_irq_save();
+    mmio_write32(DEV_RS_ADDR, mmio_read32(DEV_RS_ADDR) & ~DEV_OPTO);
+    mmio_write32(DEV_INIT1_ADDR,
+                 mmio_read32(DEV_INIT1_ADDR) | INIT_BUTTONS);
+    cw_irq_restore(f);
+    mmio_write32(CLICKWHEEL_CTRLA_ADDR, CW_CTRLA_INIT);
+    mmio_write32(CLICKWHEEL_CTRLB_ADDR, CW_CTRLB_CLEAR);
+}
+
+/*
+ * Full power sequence, for THREAD context only (clickwheel_init and the
+ * polled clickwheel_poll path). Same register grammar as before the split.
  */
 static void opto_power(bool on)
 {
+    opto_gate(on);
     if (on) {
-        mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) | DEV_OPTO);
-        mmio_write32(DEV_RS_ADDR, mmio_read32(DEV_RS_ADDR) | DEV_OPTO);
-        for (volatile uint32_t i = 0; i < CW_RESET_HOLD_SPIN; i++) {
-            /* hold reset (~udelay(5)) */
-        }
-        mmio_write32(DEV_RS_ADDR, mmio_read32(DEV_RS_ADDR) & ~DEV_OPTO);
-        mmio_write32(DEV_INIT1_ADDR,
-                     mmio_read32(DEV_INIT1_ADDR) | INIT_BUTTONS);
-        mmio_write32(CLICKWHEEL_CTRLA_ADDR, CW_CTRLA_INIT);
-        mmio_write32(CLICKWHEEL_CTRLB_ADDR, CW_CTRLB_CLEAR);
-    } else {
-        mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) & ~DEV_OPTO);
+        opto_bringup();
     }
 }
 
@@ -152,6 +158,7 @@ void clickwheel_init(void)
     s_touched     = false;
     s_hold_edge   = false;
     s_hold_state  = s_hold_old;
+    s_need_bringup = false;      /* init does the bring-up itself, below */
     /* Only power the block if we are not already held; if held, leave it
      * gated (poll() brings it back up on the release edge). Polled path:
      * the wheel IRQ stays masked — no CPU_HI_INT_EN write. */
@@ -206,8 +213,22 @@ static bool cw_read_sample(cw_sample_t *s)
     bool    touched = (st & CW_STAT_TOUCH) != 0;
     uint8_t pos     = (uint8_t)((st >> CW_POS_SHIFT) & CW_POS_MASK);
 
+    /* The position FIELD is 7 bits (CW_POS_MASK = 0x7F, 0..127) but the wheel
+     * only ever reports 0..CW_CLICKS_PER_ROT-1 (0..0x5F). A word that decodes
+     * >= 0x60 is out of range — a partially latched or corrupted packet that
+     * slipped the header gate — and differencing it yields a nonsense delta
+     * (up to +-127) that the wrap below cannot fix. Treat it like a failed
+     * header: drop the sample, leave the decode state untouched. */
+    if (pos >= CW_CLICKS_PER_ROT) {
+        return false;
+    }
+
     /* Software quadrature: differenced absolute position, wrapped at half
-     * a rotation, gated at the sensitivity threshold. */
+     * a rotation, gated at the sensitivity threshold. The fold below is
+     * canonical into (-half, +half]: the old strict comparisons left BOTH
+     * +-half a rotation un-wrapped, so the two equidistant readings for the
+     * same physical motion came out with opposite signs (+48 vs -48) and an
+     * exact half-turn between samples scrolled the wrong way. */
     int delta = 0;
     if (touched) {
         if (!s_have_pos) {
@@ -215,8 +236,11 @@ static bool cw_read_sample(cw_sample_t *s)
             s_have_pos = true;
         }
         int d = (int)pos - (int)s_pos_old;
-        if (d < -(CW_CLICKS_PER_ROT / 2)) { d += CW_CLICKS_PER_ROT; }
-        if (d >  (CW_CLICKS_PER_ROT / 2)) { d -= CW_CLICKS_PER_ROT; }
+        if (d > (CW_CLICKS_PER_ROT / 2)) {
+            d -= CW_CLICKS_PER_ROT;
+        } else if (d <= -(CW_CLICKS_PER_ROT / 2)) {
+            d += CW_CLICKS_PER_ROT;
+        }
         if (d >= CW_WHEEL_SENSITIVITY || d <= -CW_WHEEL_SENSITIVITY) {
             delta     = d;
             s_pos_old = pos;     /* advance reference only when a tick fires */
@@ -256,7 +280,8 @@ bool clickwheel_poll(wheel_event_t *ev)
     bool hold = clickwheel_hold();
     if (hold != s_hold_old) {
         s_hold_old = hold;
-        opto_power(!hold);
+        opto_power(!hold);       /* thread context: full sequence is fine here */
+        s_need_bringup = false;
         s_have_pos = false;      /* reseed position on the next touch */
         s_btn_prev = 0;
         ev->buttons     = 0;
@@ -299,7 +324,13 @@ void clickwheel_service(void)
     bool hold = clickwheel_hold();
     if (hold != s_hold_old) {
         s_hold_old = hold;
-        opto_power(!hold);
+        /* ISR-SAFE HALF ONLY: gate the OPTO clock (one masked RMW). On a
+         * RELEASE edge the block also needs a reset pulse with a ~microsecond
+         * settle and three config writes — that used to run right here, which
+         * meant every un-hold burned ~4096 volatile spins inside the timer ISR
+         * with IRQs masked. Defer it to the mainline drain. */
+        opto_gate(!hold);
+        s_need_bringup = !hold;
         s_have_pos = false;      /* reseed position on the next touch */
         s_btn_prev = 0;
         s_pending_btn = 0;
@@ -310,8 +341,11 @@ void clickwheel_service(void)
         s_hold_edge   = true;
         return;
     }
-    if (hold) {
-        return;                  /* wheel is dead while held */
+    if (hold || s_need_bringup) {
+        /* Held (wheel dead), or released but the deferred bring-up has not run
+         * yet — the block is clock-gated-on but unconfigured, so a sample now
+         * would decode garbage. */
+        return;
     }
 
     cw_sample_t s;
@@ -338,9 +372,22 @@ bool clickwheel_get_event(wheel_event_t *ev)
         return false;
     }
 
+    /* Run any OPTO bring-up the tick sampler deferred to us (Hold release).
+     * This is the mainline half of the split in opto_gate/opto_bringup: the
+     * reset pulse + settle spin + config writes must NOT happen in the ISR.
+     * Claim the flag under the mask so a Hold edge arriving mid-bring-up
+     * re-arms it rather than being lost. */
+    uint32_t f = cw_irq_save();
+    bool bringup = s_need_bringup;
+    s_need_bringup = false;
+    cw_irq_restore(f);
+    if (bringup) {
+        opto_bringup();
+    }
+
     /* Snapshot-and-clear the latch with the sampler masked out, so the tick
      * cannot slip an edge in between the read and the clear (SPSC). */
-    uint32_t f = cw_irq_save();
+    f = cw_irq_save();
     bool    hold_edge  = s_hold_edge;
     bool    hold_state = s_hold_state;
     uint8_t btn        = s_pending_btn;

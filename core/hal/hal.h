@@ -172,7 +172,23 @@ typedef int (*audio_source_fn)(void *userdata, int16_t *buf, int frames);
  * hal_audio_init configures the output device.
  *
  * sample_rate is in Hz (typical: 44100, 48000). channels must be 1 or 2.
- * Returns 0 on success, negative on failure.
+ * Returns 0 on success, negative on failure:
+ *   -1  unsupported sample rate or channel count
+ *   -2  the output device came up but the CODEC did not respond
+ *
+ * The -2 case matters on hw: a codec that never answers gives a UI with a
+ * moving progress bar and total silence, so it must not be reported as
+ * success. (The signal is coarse — the PP502x I2C controller exposes no
+ * per-byte NAK, so a wedged bus is the only detectable failure.)
+ *
+ * On the hw backend the reachable rates are the codec PLL presets: 44100,
+ * 48000, 32000, 24000 and 22050. Mono (channels == 1) is accepted and
+ * expanded to the stereo link inside the HAL — the caller supplies one
+ * sample per frame and does not pre-duplicate.
+ *
+ * hw ALSO re-applies the user's volume/balance/bass/treble as the last step
+ * of init, because init issues a full codec reset. Callers may still re-apply
+ * them afterwards; that is redundant but harmless.
  *
  * Strict on the device's capabilities: if the underlying audio system
  * cannot give us *exactly* the requested rate and channel count, we
@@ -210,6 +226,16 @@ void hal_audio_start(void);
 /*
  * hal_audio_stop pauses output. The internal buffer is not cleared —
  * a subsequent hal_audio_start resumes from where we left off.
+ *
+ * hw: the codec is soft-muted BEFORE the transfer is cut, so stop/skip does
+ * not pop. Resume picks up inside the buffer that was mid-transfer (timed
+ * against the free-running microsecond counter, since the DMA engine exposes
+ * no residual byte count), so no already-decoded audio is discarded.
+ *
+ * Stop does NOT power the codec down — PLL, VMID and the DAC stay live, which
+ * is the full analog budget. A device left paused indefinitely should be shut
+ * down with hal_audio_close() after a timeout and re-opened with
+ * hal_audio_init() on resume; init is idempotent and per-track anyway.
  */
 void hal_audio_stop(void);
 

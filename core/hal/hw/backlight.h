@@ -35,4 +35,17 @@ void backlight_init(void);
  * dimmer to that level. Values above BACKLIGHT_MAX are clamped. */
 void backlight_set(int level);
 
+/*
+ * Periodic housekeeping, called from the 100 Hz system tick. Its only job is
+ * the screen-off power policy: backlight_set(0) drops the LED-enable line but
+ * leaves the boost converter running so a quick relight is instant, and this
+ * shuts the converter down once the off state has lasted a few seconds. The
+ * next backlight_set(level > 0) powers it back up and re-seeds the tracked
+ * level from the driver IC's power-up reference.
+ *
+ * Bounded, allocation-free, and at most ONE bus write per call — safe from
+ * interrupt context.
+ */
+void backlight_service(void);
+
 #endif /* CORE_HAL_HW_BACKLIGHT_H */

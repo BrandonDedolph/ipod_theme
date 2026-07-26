@@ -11,6 +11,7 @@
 
 #include "pp5022.h"
 #include "mmio.h"
+#include "irqlock.h"   /* DEV_EN/DEV_RS/DEV_INIT* RMW vs the timer ISR */
 #include "i2s.h"
 
 /* Reset-hold spin, matching the other drivers' bounded holds. */
@@ -31,12 +32,14 @@ void i2s_init(void)
      * path"). Pulse the I2S block out of reset, ungate its clock, enable
      * the external device clocks that feed the codec MCLK, then select
      * the 24 MHz EXT reference by clearing bits 3:2 of 0x70000018. */
+    uint32_t f = hw_irq_save();
     mmio_write32(DEV_RS_ADDR, mmio_read32(DEV_RS_ADDR) | DEV_I2S);
     mmio_write32(DEV_RS_ADDR, mmio_read32(DEV_RS_ADDR) & ~DEV_I2S);
     mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) | DEV_I2S);
     mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) | DEV_EXTCLOCKS);
     mmio_write32(DEV_EXTCLK_SEL_ADDR,
                  mmio_read32(DEV_EXTCLK_SEL_ADDR) & ~DEV_EXTCLK_24MHZ_MASK);
+    hw_irq_restore(f);
 
     /* Route the I2S/CDI pads to their I2S alternate function: clear the
      * pad-group select fields in DEV_INIT2 (CDI+I2S) and DEV_INIT1
@@ -44,11 +47,16 @@ void i2s_init(void)
      * load-bearing "why is it silent" write on a chainloaded device — if
      * Apple's flash ROM left these pads as GPIO, the codec still ACKs on
      * the separate I2C bus but no audio clocks/data reach it. RMW to
-     * preserve the other bits. */
+     * preserve the other bits — and IRQ-masked, because clickwheel_service()
+     * read-modify-writes the SAME two registers from the timer ISR on every
+     * Hold edge; losing this write to that race is exactly the silent-playback
+     * failure above (see irqlock.h). */
+    f = hw_irq_save();
     mmio_write32(DEV_INIT2_ADDR,
                  mmio_read32(DEV_INIT2_ADDR) & ~DEV_INIT2_I2S_PADS);
     mmio_write32(DEV_INIT1_ADDR,
                  mmio_read32(DEV_INIT1_ADDR) & ~DEV_INIT1_I2S_PADS);
+    hw_irq_restore(f);
 
     /* --- FIFO reset + format (05-audio.md, "i2s_reset() config"). */
     mmio_write32(IISCONFIG_ADDR, mmio_read32(IISCONFIG_ADDR) | IIS_RESET);
@@ -90,8 +98,10 @@ void i2s_disable(void)
      * so this is safe to do whenever audio is fully stopped (the codec must
      * already be powered down: MCLK is what its power-down sequence rode on). */
     mmio_write32(IISCONFIG_ADDR, mmio_read32(IISCONFIG_ADDR) & ~IIS_TXFIFOEN);
+    uint32_t f = hw_irq_save();     /* DEV_EN is shared with the wheel ISR */
     mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) & ~DEV_EXTCLOCKS);
     mmio_write32(DEV_EN_ADDR, mmio_read32(DEV_EN_ADDR) & ~DEV_I2S);
+    hw_irq_restore(f);
 }
 
 int i2s_write_stereo(int16_t left, int16_t right)

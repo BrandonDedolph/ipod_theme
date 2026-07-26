@@ -19,9 +19,31 @@
 int ata_init(void);
 
 /*
+ * Error codes shared by every command in this driver.
+ *
+ *   0                  success
+ *  -1                  bad argument, or the drive never came ready
+ *  -2                  timeout waiting for the transfer (DRQ never arrived)
+ *  -3                  drive error (ERR/DF) — RETRYABLE
+ *  ATA_ERR_IDNF (-4)   the LBA does not exist / violates the drive's physical-
+ *                      sector alignment rule. NOT retryable: an identical
+ *                      re-issue can only fail identically, so a caller with a
+ *                      retry loop must fail fast on this instead of burning
+ *                      its whole budget (04-ata.md, "Per-sector error
+ *                      handling": `if (error & ERROR_IDNF) break;`).
+ *
+ * On any of the failure codes the driver has already run the documented
+ * recovery — latch ERROR, drain residual DRQ, soft-reset the channel — so the
+ * drive is NOT left mid-command and a caller's retry starts clean. (Before
+ * this, a retry over a half-finished multi-sector read could return data
+ * shifted by the un-drained residue AND report success.)
+ */
+#define ATA_ERR_IDNF  (-4)
+
+/*
  * Read `count` (1..256) 512-byte sectors starting at LBA `lba` into `buf`
  * (must be 16-bit aligned; needs count*512 bytes). Returns 0 on success,
- * negative on a bad argument, a not-ready/DRQ timeout, or a drive error.
+ * negative per the code table above.
  */
 int ata_read_sectors(uint32_t lba, uint32_t count, void *buf);
 
@@ -43,9 +65,11 @@ int ata_standby(void);
 
 /*
  * Spin the drive back UP after ata_standby() and confirm it can transfer:
- * kicks a throwaway 1-sector read and waits out the (multi-second) spin-up.
- * Call once on wake before resuming normal reads. Returns 0, or negative on a
- * spin-up timeout / drive error.
+ * kicks a throwaway read of one whole PHYSICAL sector (this drive IDNFs a
+ * sub-physical-sector read, so a 1-sector probe always failed) and waits out
+ * the multi-second spin-up. Call once on wake before resuming normal reads.
+ * Returns 0, or negative per the code table above. ata_is_parked() is
+ * reconciled to 0 on EVERY exit path, success or not.
  */
 int ata_wakeup(void);
 

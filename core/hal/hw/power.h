@@ -16,9 +16,19 @@
  * Enter PMU deep-sleep standby. Wakes on a face-button press (EXTONWAK) or
  * charger insertion (CHGWAK) — a wake source is ALWAYS set, since standby
  * without one can never be powered on again (06-power.md, ipodlinux
- * warning). Does NOT return: the PMU cuts SoC power. Callers should quiesce
- * first (stop playback, blank the panel).
+ * warning). Callers should quiesce first (stop playback, blank the panel).
+ *
+ * Also performs the pre-sleep IRAM clear at 0x4000C000 that stops Apple's OF
+ * taking the boot-from-sleep path on the next power-on (06-power.md,
+ * "Pre-sleep housekeeping").
+ *
+ * NORMALLY DOES NOT RETURN: the PMU cuts SoC power. It returns only when
+ * standby could not be entered at all — a wedged I2C control bus that did not
+ * accept the command after a bounded number of retries. In that case it
+ * returns -1 and has relit the backlight so the failure is visible, and the
+ * caller should carry on rather than assume it is powering down. (Previously
+ * this case was an unkillable for(;;) on a dark screen.)
  */
-void power_standby(void);
+int power_standby(void);
 
 #endif /* CORE_HAL_HW_POWER_H */

@@ -69,6 +69,42 @@ static int ata_wait_ready(void)
     return spin != 0 ? 0 : -1;
 }
 
+/*
+ * CPU-frequency bracket for a transfer (04-ata.md, "PIO timing values" — the
+ * table is qualified "At 80 MHz operation"). We never rewrite
+ * IDE0_PRI_TIMING0, so the PIO strobe widths are frozen at whatever the
+ * chainloader calibrated them to, while kernel/clock.c moves the core (and
+ * therefore the IDE bus clock) between 30 and 80 MHz. Issuing a transfer at a
+ * DIFFERENT clock than the strobes were calibrated for is at best slow and at
+ * worst marginal, so every command is bracketed in the boost: one fixed
+ * operating point for all ATA traffic.
+ *
+ * cpu_boost/cpu_unboost are refcounted, so when the UI or the player already
+ * holds a boost (the common case — main.c boosts whenever the backlight is on
+ * or audio is playing) this is a pure counter bump with NO PLL work. Only a
+ * read issued from deep idle pays a frequency switch, and that path is already
+ * dominated by the multi-second platter spin-up.
+ *
+ * Declared weak so this driver still links in the host golden-trace test,
+ * which compiles ata.c alone with no kernel clock driver.
+ */
+__attribute__((weak)) void cpu_boost(void);
+__attribute__((weak)) void cpu_unboost(void);
+
+static void ata_clock_hold(void)
+{
+    if (cpu_boost) {
+        cpu_boost();
+    }
+}
+
+static void ata_clock_release(void)
+{
+    if (cpu_unboost) {
+        cpu_unboost();
+    }
+}
+
 /* Wait for start-of-transfer: BSY clear and DRQ set. Returns -2 on a drive
  * error (ERR/DF) surfaced while waiting, -1 on timeout. */
 static int ata_wait_drq(void)
@@ -90,16 +126,16 @@ static int ata_wait_drq(void)
     }
 }
 
-int ata_init(void)
+/*
+ * Soft-reset the ATA channel. SRST+nIEN asserts reset, then nIEN alone
+ * releases it (04-ata.md, "Soft reset"); the drive stays spun up throughout.
+ * Delays are bounded busy-waits (this also runs at bring-up, before any timer
+ * exists): ~tens of us after asserting, a few ms after releasing, per the ATA
+ * reset timing. Factored out of ata_init() so the per-sector error recovery
+ * (04-ata.md, "Per-sector error handling") can reuse the exact same sequence.
+ */
+static void ata_bus_reset(void)
 {
-    /* Soft-reset the ATA channel before use. The minimal "just reuse the
-     * bootloader handoff state" init (select + wait-ready) reached a ready
-     * drive on device but READ SECTORS returned a drive error — the drive
-     * needs a clean reset to accept fresh commands. SRST+nIEN asserts
-     * reset, then nIEN alone releases it (04-ata.md, "Soft reset"); the
-     * drive stays spun up throughout. Delays are bounded busy-waits (no
-     * timer yet at bring-up): ~tens of us after asserting, a few ms after
-     * releasing, per the ATA reset timing. */
     mmio_write8(ATA_CONTROL_ADDR, ATA_CONTROL_SRST | ATA_CONTROL_NIEN);
     for (volatile uint32_t d = 0; d < (1u << 10); d++) {
         /* hold reset asserted (>= ~5 us) */
@@ -108,11 +144,68 @@ int ata_init(void)
     for (volatile uint32_t d = 0; d < (1u << 17); d++) {
         /* post-reset recovery (> ~2 ms) */
     }
+}
+
+int ata_init(void)
+{
+    /* Soft-reset the channel before use. The minimal "just reuse the
+     * bootloader handoff state" init (select + wait-ready) reached a ready
+     * drive on device but READ SECTORS returned a drive error — the drive
+     * needs a clean reset to accept fresh commands. */
+    ata_bus_reset();
 
     /* Select the master device (with the obsolete must-be-1 bits) and wait
      * for it to come ready. */
     mmio_write8(ATA_SELECT_ADDR, ATA_SELECT_OBS);
     return ata_wait_ready();
+}
+
+/*
+ * MID-TRANSFER ERROR RECOVERY (04-ata.md, "Per-sector error handling").
+ *
+ * A multi-sector READ SECTORS that fails partway through leaves the drive
+ * mid-command: it still has the remaining sectors queued and may still be
+ * asserting DRQ with unread data in its buffer. Walking away from that state
+ * is a DATA-INTEGRITY bug, not just an error-reporting one — the caller's
+ * retry re-issues READ SECTORS on top of the residue, and the drive answers
+ * with data shifted by however many halfwords were left behind, which the
+ * retry then reports as SUCCESS. That silently corrupts FLAC frames and, far
+ * worse, FAT/directory sectors.
+ *
+ * So on any error inside the transfer loop: latch the ERROR register (the
+ * only place IDNF is visible), drain whatever DRQ still holds, then soft-reset
+ * the channel so the next command starts from a clean drive state.
+ *
+ * Returns the classified result code for the caller.
+ */
+#define ATA_DRAIN_LIMIT  (256u * 256u)   /* bounded: 256 sectors' worth of words */
+
+static int ata_recover(int cause)
+{
+    /* 1. Error register FIRST — a reset clears it. */
+    uint8_t err = mmio_read8(ATA_ERROR_ADDR);
+
+    /* 2. Drain any data the drive is still offering, bounded. Reading the
+     *    data port is what retires a DRQ block; without this the drive can sit
+     *    with a full buffer that the reset then has to discard mid-handshake. */
+    uint32_t drain = ATA_DRAIN_LIMIT;
+    while ((mmio_read8(ATA_ALT_STATUS_ADDR) & ATA_STATUS_DRQ) && --drain != 0) {
+        (void)mmio_read16(ATA_DATA_ADDR);
+    }
+
+    /* 3. Clean slate for the next command. */
+    ata_bus_reset();
+    mmio_write8(ATA_SELECT_ADDR, ATA_SELECT_OBS);
+    (void)ata_wait_ready();
+
+    /* 4. IDNF means the LBA does not exist on this drive (or violates its
+     *    physical-sector alignment rule) — re-issuing the identical command
+     *    can only fail identically, so report it distinctly and let the caller
+     *    fail fast instead of burning its whole retry budget. */
+    if (err & ATA_ERROR_IDNF) {
+        return ATA_ERR_IDNF;
+    }
+    return cause;
 }
 
 int ata_identify(void *buf)
@@ -160,7 +253,7 @@ static int g_ata_parked;
 
 int ata_is_parked(void) { return g_ata_parked; }
 
-static int ata_read_raw(uint32_t lba, uint32_t count, void *buf)
+static int ata_read_raw_locked(uint32_t lba, uint32_t count, void *buf)
 {
     if (count == 0 || count > 256) {
         return -1;
@@ -190,7 +283,8 @@ static int ata_read_raw(uint32_t lba, uint32_t count, void *buf)
     for (uint32_t s = 0; s < count; s++) {
         int rc = ata_wait_drq();
         if (rc != 0) {
-            return rc == -2 ? -3 : -2;   /* -3 drive error, -2 timeout */
+            /* -3 drive error, -2 timeout; ata_recover may upgrade to IDNF. */
+            return ata_recover(rc == -2 ? -3 : -2);
         }
         /* Read the primary status once to acknowledge, then stream the
          * sector: 256 little-endian halfwords straight into the buffer. */
@@ -200,10 +294,20 @@ static int ata_read_raw(uint32_t lba, uint32_t count, void *buf)
         }
         uint8_t st = mmio_read8(ATA_ALT_STATUS_ADDR);
         if (st & (ATA_STATUS_ERR | ATA_STATUS_DF)) {
-            return -3;
+            return ata_recover(-3);
         }
     }
     return 0;
+}
+
+/* Clock-bracketed wrapper: every command issued by this driver runs at one
+ * fixed CPU/IDE clock (see ata_clock_hold). */
+static int ata_read_raw(uint32_t lba, uint32_t count, void *buf)
+{
+    ata_clock_hold();
+    int rc = ata_read_raw_locked(lba, count, buf);
+    ata_clock_release();
+    return rc;
 }
 
 int ata_read_sectors(uint32_t lba, uint32_t count, void *buf)
@@ -265,7 +369,9 @@ int ata_read_sectors(uint32_t lba, uint32_t count, void *buf)
 
 int ata_standby(void)
 {
+    ata_clock_hold();
     if (ata_wait_ready() != 0) {
+        ata_clock_release();
         return -1;
     }
     mmio_write8(ATA_SELECT_ADDR, ATA_SELECT_OBS);          /* master */
@@ -277,35 +383,39 @@ int ata_standby(void)
     if (rc == 0) {
         g_ata_parked = 1;
     }
+    ata_clock_release();
     return rc;
 }
 
 int ata_wakeup(void)
 {
-    /* Drive is "ready" in standby (BSY clear, RDY set) but spun down; a read
-     * triggers spin-up. Issue a throwaway 1-sector read of LBA 0 and wait out
-     * the spin-up with the extended limit, then drain the sector. */
-    if (ata_wait_ready() != 0) {
-        return -1;
-    }
-    mmio_write8(ATA_NSECTOR_ADDR, 1);
-    mmio_write8(ATA_SECTOR_ADDR,  0);
-    mmio_write8(ATA_LCYL_ADDR,    0);
-    mmio_write8(ATA_HCYL_ADDR,    0);
-    mmio_write8(ATA_SELECT_ADDR,  (uint8_t)(ATA_SELECT_OBS | ATA_SELECT_LBA));
-    mmio_write8(ATA_COMMAND_ADDR, ATA_CMD_READ_SECTORS);
-    for (volatile uint32_t g = 0; g < 64; g++) {
-        /* settle */
-    }
-    int rc = ata_wait_drq();        /* time-based wait tolerates the spin-up */
-    if (rc != 0) {
-        return rc;
-    }
-    for (int w = 0; w < 256; w++) {
-        (void)mmio_read16(ATA_DATA_ADDR);
-    }
-    g_ata_parked = 0;               /* fully spun up and confirmed transferable */
-    return 0;
+    /*
+     * The drive reports "ready" in standby (BSY clear, RDY set) but is spun
+     * down; a READ is what triggers spin-up. The throwaway read MUST cover a
+     * whole PHYSICAL sector — this drive rejects sub-physical-sector access
+     * with IDNF (see ATA_PHYS_LOG above; verified on device 2026-07-18:
+     * count=1 IDNFs, count=2 at an even LBA succeeds). The old count=1 read
+     * therefore ALWAYS errored, which meant the spin-up was never pre-paid,
+     * an ERR stayed latched on the drive, and — because the function returned
+     * before clearing it — g_ata_parked stayed set forever, so ata_is_parked()
+     * lied to every caller for the rest of the boot.
+     *
+     * ata_read_raw drains the full transfer, runs the documented error
+     * recovery on failure, and clears g_ata_parked the moment the command is
+     * issued; the extended (time-based) DRQ wait inside it tolerates the
+     * multi-second spin-up.
+     */
+    int rc = ata_read_raw(0, ATA_PHYS_LOG, ata_bounce);
+
+    /*
+     * Reconcile on EVERY exit path. Even a failed wake means we can no longer
+     * claim the platters are parked (the READ either spun them up or the drive
+     * is in a state we cannot characterise). Reporting "not parked" makes the
+     * idle timer re-issue STANDBY later — harmless; reporting "parked" forever
+     * suppresses spin-up pre-payment for the rest of the session.
+     */
+    g_ata_parked = 0;
+    return rc;
 }
 
 /* ---------------------------------------------------------------------------
