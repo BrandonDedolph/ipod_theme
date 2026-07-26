@@ -52,6 +52,16 @@ static void cpu_wait_ms(uint8_t ms) {
     __asm__ volatile("nop\n\tnop\n\tnop");
 }
 
+/* Same halt, in MICROseconds (the counter field is 8 bits, so <= 255 us). The
+ * doc describes PROC_WAIT_CNT as "sleep until countdown" and does NOT promise an
+ * interrupt wake, so anything used while AUDIO IS PLAYING must stay inside the
+ * DMA ISR's deadline: the transfer is single-shot and re-kicked in the ISR, and
+ * only the 16-frame I2S FIFO (~363 us) covers a late one. */
+static void cpu_wait_us(uint8_t us) {
+    mmio_write32(CPU_CTL_ADDR, PROC_WAIT_CNT | PROC_CNT_USEC | us);
+    __asm__ volatile("nop\n\tnop\n\tnop");
+}
+
 /* ---------------------------------------------------------------------------
  * Timed UI windows (volume overlay, lock/unlock plate)
  *
@@ -153,9 +163,41 @@ static void ui_text_centered(int y, const char *s, const text_font_t *font,
  * at those spots. Each corner row is inset along a quarter-circle. */
 static int isqrt_i(int v)
 {
-    int r = 0;
-    while ((r + 1) * (r + 1) <= v) r++;
-    return r;
+    /* Bitwise integer sqrt: ~4 iterations for the radii we use, no multiply in
+     * the loop. The old form stepped r up one at a time WITH a multiply, and it
+     * ran per scanline of every rounded rect — including the selection bar on
+     * every single list repaint. */
+    unsigned x = (unsigned)(v < 0 ? 0 : v), res = 0, bit = 1u << 16;
+    while (bit > x) bit >>= 2;
+    while (bit) {
+        if (x >= res + bit) {
+            x   -= res + bit;
+            res  = (res >> 1) + bit;
+        } else {
+            res >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (int)res;
+}
+
+/* Corner inset per corner row for one radius, memoized. Consecutive calls use
+ * the SAME radius (r=4 for every selection bar, r=3 for the load bar…), so a
+ * one-entry cache turns the per-scanline sqrt into a table read. */
+#define RR_MAX_R 16
+static int     g_rr_r = -1;
+static uint8_t g_rr_inset[RR_MAX_R];
+
+static const uint8_t *rr_insets(int r)
+{
+    if (r != g_rr_r) {
+        for (int k = 0; k < r; k++) {
+            int dy = r - k;
+            g_rr_inset[k] = (uint8_t)(r - isqrt_i(r * r - dy * dy));
+        }
+        g_rr_r = r;
+    }
+    return g_rr_inset;
 }
 
 static void fill_round_rect(int x, int y, int w, int h, int r, uint16_t c)
@@ -163,14 +205,13 @@ static void fill_round_rect(int x, int y, int w, int h, int r, uint16_t c)
     if (r < 1) { console_fill_rect(x, y, w, h, c); return; }
     if (2 * r > w) r = w / 2;
     if (2 * r > h) r = h / 2;
+    if (r > RR_MAX_R) r = RR_MAX_R;
+    const uint8_t *ins = rr_insets(r);
     for (int ry = 0; ry < h; ry++) {
         int inset = 0, k = -1;
         if (ry < r)            k = ry;
         else if (ry >= h - r)  k = h - 1 - ry;
-        if (k >= 0) {
-            int dy = r - k;
-            inset = r - isqrt_i(r * r - dy * dy);
-        }
+        if (k >= 0) inset = ins[k];
         console_fill_rect(x + inset, y + ry, w - 2 * inset, 1, c);
     }
 }
@@ -186,6 +227,36 @@ static uint16_t blend565(uint16_t bg, uint16_t fg, int a)
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
+/* 4x4-supersampled coverage of one corner quadrant, memoized per radius: the
+ * count (0..16) of sub-samples inside the circle for corner pixel (ry, rx). The
+ * AA rounded rect used to recompute this 16-sample loop for every corner pixel
+ * of every paint, for a radius that is always one of a handful of values. */
+#define AA_SS 16                            /* S*S sub-samples, S = 4          */
+static int     g_aa_r = -1;
+static uint8_t g_aa_mask[RR_MAX_R * RR_MAX_R];
+
+static const uint8_t *aa_corner_mask(int r)
+{
+    if (r != g_aa_r) {
+        const int S = 4, cN = r * 2 * S;             /* circle centre, x2S      */
+        for (int ry = 0; ry < r; ry++) {
+            for (int rx = 0; rx < r; rx++) {
+                int inside = 0;
+                for (int sy = 0; sy < S; sy++) {
+                    int dy = ry * 2 * S + sy * 2 + 1 - cN;
+                    for (int sx = 0; sx < S; sx++) {
+                        int dx = rx * 2 * S + sx * 2 + 1 - cN;
+                        if (dx * dx + dy * dy <= cN * cN) inside++;
+                    }
+                }
+                g_aa_mask[ry * RR_MAX_R + rx] = (uint8_t)inside;
+            }
+        }
+        g_aa_r = r;
+    }
+    return g_aa_mask;
+}
+
 /* Anti-aliased filled rounded rect: solid interior + straight edges, with the
  * four corner quadrants super-sampled (4x4) so their boundary pixels blend into
  * whatever is already in the framebuffer — smooth corners instead of the integer
@@ -197,23 +268,17 @@ static void fill_round_rect_aa(int x, int y, int w, int h, int r, uint16_t c)
     if (r < 1) { console_fill_rect(x, y, w, h, c); return; }
     if (2 * r > w) r = w / 2;
     if (2 * r > h) r = h / 2;
+    if (r > RR_MAX_R) r = RR_MAX_R;
     console_fill_rect(x, y + r, w, h - 2 * r, c);          /* solid middle band  */
     uint16_t *fb = console_fb();
-    const int S = 4, cN = r * 2 * S;                       /* circle centre, x2S */
+    const uint8_t *mask = aa_corner_mask(r);
     for (int ry = 0; ry < r; ry++) {
         console_fill_rect(x + r, y + ry,         w - 2 * r, 1, c);   /* top edge */
         console_fill_rect(x + r, y + h - 1 - ry, w - 2 * r, 1, c);   /* bot edge */
         for (int rx = 0; rx < r; rx++) {
-            int inside = 0;
-            for (int sy = 0; sy < S; sy++) {
-                int dy = ry * 2 * S + sy * 2 + 1 - cN;
-                for (int sx = 0; sx < S; sx++) {
-                    int dx = rx * 2 * S + sx * 2 + 1 - cN;
-                    if (dx * dx + dy * dy <= cN * cN) inside++;
-                }
-            }
+            int inside = mask[ry * RR_MAX_R + rx];
             if (inside == 0) continue;
-            int a = inside * 256 / (S * S);
+            int a = inside * 256 / AA_SS;
             int xs[2] = { x + rx, x + w - 1 - rx };
             int ys[2] = { y + ry, y + h - 1 - ry };
             for (int i = 0; i < 2; i++)
@@ -863,25 +928,33 @@ static void list_row_at(int y0, int r, const char *text, const char *sub,
         int cy = ry + (rh - cd) / 2;
         console_blit565(12, cy, cd, cd, chip);
         /* Round the chip's corners (~2px, menus.jsx Chip radius) by knocking the
-         * outer corner pixels back to the row background. */
+         * outer corner pixels back to the row background. Written straight into
+         * the framebuffer: these are 12 single pixels, and a 1x1 console_fill_rect
+         * each ran the whole clamp preamble per pixel, per row, per frame. The
+         * chip sits inside the blit above, so it is on-panel by construction —
+         * bounds are still checked once for the row band. */
         uint16_t cbg = selected ? LINEN_SEL_BG : LINEN_SURFACE;
-        for (int dy = 0; dy < 2; dy++) {
-            for (int dx = 0; dx < 2; dx++) {
-                if (dx + dy >= 2) continue;
-                console_fill_rect(12 + dx,            cy + dy,            1, 1, cbg);
-                console_fill_rect(12 + cd - 1 - dx,   cy + dy,            1, 1, cbg);
-                console_fill_rect(12 + dx,            cy + cd - 1 - dy,   1, 1, cbg);
-                console_fill_rect(12 + cd - 1 - dx,   cy + cd - 1 - dy,   1, 1, cbg);
+        if (cy >= 0 && cy + cd <= LCD_HEIGHT) {
+            uint16_t *fb = console_fb();
+            for (int dy = 0; dy < 2; dy++) {
+                uint16_t *top = &fb[(cy + dy) * LCD_WIDTH + 12];
+                uint16_t *bot = &fb[(cy + cd - 1 - dy) * LCD_WIDTH + 12];
+                for (int dx = 0; dx < 2 - dy; dx++) {
+                    top[dx] = top[cd - 1 - dx] = cbg;
+                    bot[dx] = bot[cd - 1 - dx] = cbg;
+                }
             }
         }
         tx = 12 + cd + 8;
     }
     const text_font_t *tf = selected ? FONT_HEADER : FONT_ROW;
-    /* Where the title must stop (before the right value / chevron). */
+    /* Where the title must stop (before the right value / chevron). Measure the
+     * right-hand value ONCE — it used to be walked twice per row per frame. */
     int title_right;
     int show_right = (right && right[0]);
-    if (right && right[0]) {
-        int reserved = LCD_WIDTH - 16 - text_width(right, text_font_bold_11()) - 6;
+    int right_w    = show_right ? text_width(right, text_font_bold_11()) : 0;
+    if (show_right) {
+        int reserved = LCD_WIDTH - 16 - right_w - 6;
         /* title_priority: the title owns the row. Reserve the value column only
          * while the title still fits inside it; once it's too long the title
          * spans the full width (over where the value was) and the value drops —
@@ -919,8 +992,8 @@ static void list_row_at(int y0, int r, const char *text, const char *sub,
         ui_text(tx, sub_y, sub, FONT_SMALL, subc);
     }
     if (show_right) {
-        int w = text_width(right, text_font_bold_11());   /* right values 10/600 */
-        ui_text(LCD_WIDTH - 16 - w, rowmid, right, text_font_bold_11(), rightc);
+        ui_text(LCD_WIDTH - 16 - right_w, rowmid, right, text_font_bold_11(),
+                rightc);
     } else if (chevron) {
         ui_text(LCD_WIDTH - 18, rowmid, UI_GLYPH_RAQUO, FONT_ROW, chevc);
     }
@@ -1637,11 +1710,56 @@ static void load_bar(const char *title, int pct)
     lcd_present_fb(console_framebuffer());
 }
 
+/* ---------------------------------------------------------------------------
+ * Load-time lookup indexes
+ *
+ * Two hot loops used to be O(n^2) over the whole library: the per-album resolve
+ * pass scanned all 1200 songs for every file in every album (~1.4M compares at
+ * boot), and the queue builders called album_by_clus per song. Both get a hash
+ * bucket built once, in library_finish, so the lookups are O(1).
+ * ------------------------------------------------------------------------- */
+#define SONG_HASH_BUCKETS 2048           /* power of two > LIB_MAX_SONGS       */
+#define ALBUM_HASH_BUCKETS 512           /* power of two > LIB_MAX_ALBUMS      */
+
+/* Chained buckets, stored as index+1 so 0 means "end of chain". */
+static uint16_t g_song_hh[SONG_HASH_BUCKETS];
+static uint16_t g_song_hn[LIB_MAX_SONGS];
+static uint16_t g_album_hh[ALBUM_HASH_BUCKETS];
+static uint16_t g_album_hn[LIB_MAX_ALBUMS];
+static int      g_lookup_built;
+
+/* Songs are keyed by the folded hash of their EXT-TRIMMED filename — the one
+ * form both callers have (the index record's file[] and the on-disk name after
+ * copy_display_name). */
+static void lookup_build(void)
+{
+    for (int i = 0; i < SONG_HASH_BUCKETS; i++)  g_song_hh[i]  = 0;
+    for (int i = 0; i < ALBUM_HASH_BUCKETS; i++) g_album_hh[i] = 0;
+    for (int i = 0; i < g_songs_n; i++) {
+        uint32_t b = name_hash(g_songs[i].file) & (SONG_HASH_BUCKETS - 1);
+        g_song_hn[i] = g_song_hh[b];
+        g_song_hh[b] = (uint16_t)(i + 1);
+    }
+    for (int i = 0; i < g_albums_n; i++) {
+        uint32_t b = g_albums[i].clus & (ALBUM_HASH_BUCKETS - 1);
+        g_album_hn[i] = g_album_hh[b];
+        g_album_hh[b] = (uint16_t)(i + 1);
+    }
+    g_lookup_built = 1;
+}
+
 /* Album index by folder cluster, or -1. Used to attach each shuffled song's
  * cover (and elsewhere a track needs its album without a scan). */
 static int album_by_clus(uint32_t dc)
 {
-    for (int i = 0; i < g_albums_n; i++) {
+    if (g_lookup_built) {
+        for (int i = g_album_hh[dc & (ALBUM_HASH_BUCKETS - 1)]; i; ) {
+            if (g_albums[i - 1].clus == dc) return i - 1;
+            i = g_album_hn[i - 1];
+        }
+        return -1;
+    }
+    for (int i = 0; i < g_albums_n; i++) {      /* pre-index: linear */
         if (g_albums[i].clus == dc) return i;
     }
     return -1;
@@ -1667,12 +1785,25 @@ static int resolve_art_cb(void *ud, const fat32_dirent_t *e)
     uint32_t fh = name_hash(e->name);             /* over the FULL name incl ext */
     char nm[NAME_MAX + 1];
     copy_display_name(nm, e->name, 1);            /* ext-trimmed, matches s->file */
-    for (int s = 0; s < g_songs_n; s++) {
+    /* O(1) candidate list: songs whose trimmed filename folds to the same hash.
+     * The match test itself is unchanged — primary is the record's file_hash
+     * (index path), fallback the ext-trimmed name compare (scan path, whose
+     * file_hash is 0) — so a name too long to have been stored identically on
+     * both sides still falls through to the linear sweep below. */
+    for (int i = g_song_hh[name_hash(nm) & (SONG_HASH_BUCKETS - 1)]; i; ) {
+        int s = i - 1;
+        i = g_song_hn[s];
         if (g_songs[s].file_clus || g_songs[s].dir_clus != g_res_album_clus) continue;
-        /* Primary: the record's file_hash (index path). Fallback: ext-trimmed
-         * name compare (covers the scan path, whose file_hash is 0). */
         if ((g_songs[s].file_hash && g_songs[s].file_hash == fh) ||
             name_eq_ci(g_songs[s].file, nm)) {
+            g_songs[s].file_clus = e->first_clus;
+            g_songs[s].file_size = e->size;
+            return 0;
+        }
+    }
+    for (int s = 0; s < g_songs_n; s++) {         /* rare: hash didn't line up */
+        if (g_songs[s].file_clus || g_songs[s].dir_clus != g_res_album_clus) continue;
+        if (g_songs[s].file_hash && g_songs[s].file_hash == fh) {
             g_songs[s].file_clus = e->first_clus;
             g_songs[s].file_size = e->size;
             break;
@@ -1873,7 +2004,8 @@ static void library_finish(void)
     }
 
     /* Alphabetise the album list A->Z by album title (insertion sort; the list
-     * is small). g_albumview is derived from this, so the menu is sorted too. */
+     * is small). g_albumview is derived from this, so the menu is sorted too.
+     * The lookup indexes are (re)built AFTER this, since the sort moves albums. */
     for (int i = 1; i < g_albums_n; i++) {
         lib_album_t v = g_albums[i];
         char va[NAME_MAX + 1], vk[NAME_MAX + 1];
@@ -1888,6 +2020,8 @@ static void library_finish(void)
         }
         g_albums[j + 1] = v;
     }
+
+    lookup_build();                        /* song-by-name + album-by-cluster */
 }
 
 /* Show a "building library" splash then scan (blocks; anti-skip covers audio). */
@@ -2606,7 +2740,11 @@ static void detail_load_meta(fat32_t *fs)
         if (g_browse[i].is_dir) continue;
         g_album_track_n++;
         if (g_lib_indexed) {
-            for (int s = 0; s < g_songs_n; s++) {
+            /* Same match as before (folder cluster + ext-trimmed name), but over
+             * the songs in this filename's hash bucket instead of all 1200. */
+            uint32_t b = name_hash(g_browse[i].name) & (SONG_HASH_BUCKETS - 1);
+            for (int k = g_song_hh[b]; k; k = g_song_hn[k - 1]) {
+                int s = k - 1;
                 if (g_songs[s].dir_clus == g_cur_dir &&
                     name_eq_ci(g_songs[s].file, g_browse[i].name)) {
                     g_track_dur[i]  = (uint16_t)g_songs[s].duration_s;
@@ -2858,6 +2996,100 @@ static int list_repaint_partial(void)
     return 1;
 }
 
+/* ---------------------------------------------------------------------------
+ * Wheel acceleration + the A-Z locator
+ *
+ * The driver reports a differenced position count, so one detent is one row no
+ * matter how fast you spin — with 1200 songs that is a very long spin. Real
+ * iPods accelerate: the faster the wheel turns, the more rows each detent
+ * covers, with a big letter shown while it's flying so you can aim. Velocity is
+ * derived from the GAP between wheel events (they arrive as fast as the wheel
+ * is turned) and decays on its own.
+ * ------------------------------------------------------------------------- */
+#define WHEEL_VEL_MAX   8                  /* rows per detent at full tilt      */
+#define WHEEL_FAST_US   40000u             /* < this gap => spinning up         */
+#define WHEEL_IDLE_US   200000u            /* > this gap => new gesture, reset  */
+#define WHEEL_AZ_VEL    3                  /* velocity at which the letter shows */
+#define WHEEL_AZ_HOLD   500000u            /* ...and how long after the last tick */
+
+static uint32_t g_wheel_last_us;
+static int      g_wheel_vel = 1;
+
+/* Called once per wheel event: fold this event's arrival time into the velocity
+ * and return the current rows-per-detent multiplier. */
+static int wheel_accel_step(void)
+{
+    uint32_t now = mmio_read32(USEC_TIMER_ADDR);
+    uint32_t dt  = now - g_wheel_last_us;
+    g_wheel_last_us = now;
+    if (dt > WHEEL_IDLE_US) {
+        g_wheel_vel = 1;                              /* fresh, deliberate move */
+    } else if (dt < WHEEL_FAST_US) {
+        if (++g_wheel_vel > WHEEL_VEL_MAX) g_wheel_vel = WHEEL_VEL_MAX;
+    } else if (g_wheel_vel > 1) {
+        g_wheel_vel--;                                /* easing off             */
+    }
+    return g_wheel_vel;
+}
+
+/* True while the list is flying past fast enough to want the letter cue. */
+static int wheel_accelerating(void)
+{
+    if (g_wheel_vel < WHEEL_AZ_VEL) return 0;
+    return (uint32_t)(mmio_read32(USEC_TIMER_ADDR) - g_wheel_last_us)
+           < WHEEL_AZ_HOLD;
+}
+
+/* Uppercased first letter of `s`, '#' for anything not A-Z. */
+static char initial_of(const char *s)
+{
+    while (*s == ' ') s++;
+    char c = *s;
+    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+    return (c >= 'A' && c <= 'Z') ? c : '#';
+}
+
+/* The selected row's initial on the alphabetised lists (songs / artists /
+ * albums), read straight off the already-sorted arrays; 0 on screens where an
+ * A-Z cue would mean nothing. */
+static char list_sel_initial(void)
+{
+    switch (scr_cur()) {
+    case SCR_SONGS:
+        if (g_songview_n > 0 && g_song_sel < g_songview_n) {
+            return initial_of(g_songs[g_songview[g_song_sel]].title);
+        }
+        break;
+    case SCR_ARTISTS:
+        if (g_artists_n > 0 && g_artist_sel < g_artists_n) {
+            return initial_of(artist_key(g_artists[g_artist_sel].name));
+        }
+        break;
+    case SCR_BROWSER:
+        if (g_dir_depth == 0 && g_albumview_n > 0 && g_br_sel < g_albumview_n) {
+            char a[NAME_MAX + 1], b[NAME_MAX + 1];
+            split_artist_album(g_albums[g_albumview[g_br_sel]].folder, a, b);
+            return initial_of(b);              /* albums sort by album title */
+        }
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
+/* The letter itself, on a centred plate over the flying list. */
+static void az_overlay_render(char ch)
+{
+    const int PW = 66, PH = 66;
+    int px = (LCD_WIDTH - PW) / 2, py = (LCD_HEIGHT - PH) / 2;
+    fill_round_rect_aa(px - 1, py - 1, PW + 2, PH + 2, 13, LINEN_BORDER);
+    fill_round_rect_aa(px, py, PW, PH, 12, LINEN_PLATE);
+    char s[2] = { ch, '\0' };
+    int w = text_width(s, FONT_TITLE);
+    ui_text(px + (PW - w) / 2, py + PH / 2 + 8, s, FONT_TITLE, LINEN_INK);
+}
+
 /* Busy-wait `us` microseconds (PWM already off) — for the silent gap in the
  * multi-burst clicker profiles. Short enough not to underrun the decode buffer. */
 static void ui_spin_us(uint32_t us)
@@ -2895,12 +3127,17 @@ static void ui_click(void)
 /* Apply a wheel event to a selection index in [0, count) with acceleration. */
 static int wheel_move(int sel, int count, int8_t delta, int *accum)
 {
+    int vel = wheel_accel_step();     /* every event feeds the velocity estimate */
     int wd = delta;
     if (wd >  WHEEL_MAX_DELTA) wd =  WHEEL_MAX_DELTA;
     if (wd < -WHEEL_MAX_DELTA) wd = -WHEEL_MAX_DELTA;
     *accum += wd;
     int move = *accum / WHEEL_CLICKS_PER_ITEM;
     *accum -= move * WHEEL_CLICKS_PER_ITEM;
+    /* Acceleration: one detent still moves one row when you turn the wheel
+     * deliberately (vel 1), but a fast spin covers up to WHEEL_VEL_MAX rows per
+     * detent — the difference between 1200 songs being reachable and not. */
+    move *= vel;
     int old = sel;
     sel += move;
     if (sel < 0)          sel = 0;
@@ -3051,6 +3288,7 @@ _Noreturn static void run_ui(fat32_t *fs)
     int      hold_prev = clickwheel_hold() ? 1 : 0;  /* seed hold-edge detect    */
     int      ext_prev  = power_is_external() ? 1 : 0; /* seed plug-in edge detect */
     int      lock_flashing = 0;          /* a lock/unlock plate is on screen     */
+    char     az_prev = 0;                /* A-Z locator letter on screen         */
     int      play_held = 0;              /* PLAY currently down (long-press off)  */
     uint32_t play_down_us = 0;           /* when PLAY went down                   */
     g_locked = hold_prev;
@@ -3065,7 +3303,12 @@ _Noreturn static void run_ui(fat32_t *fs)
     int was_active = 0;                   /* detect the active->idle edge          */
     int last_qidx  = -1;                  /* queue position at the last pass       */
     for (;;) {
+        /* Time the pump: when it returns in a few microseconds the decode step
+         * produced nothing (PCM ring full) and the disk buffer isn't filling —
+         * i.e. this pass had no work. Used at the bottom of the loop to halt. */
+        uint32_t pump_t0 = mmio_read32(USEC_TIMER_ADDR);
         player_pump();
+        uint32_t pump_us = mmio_read32(USEC_TIMER_ADDR) - pump_t0;
 
         /* TRACK-CHANGE EDGE — unconditional, above every screen-specific branch.
          * Auto-advance moves the queue with no button event, and several screens
@@ -3564,6 +3807,11 @@ _Noreturn static void run_ui(fat32_t *fs)
             dirty = 1;
         }
 
+        /* A-Z locator: while the wheel is being spun fast, show the selected
+         * row's initial so you can aim at a letter instead of reading rows that
+         * are flying past. Its appearance/disappearance is itself a repaint. */
+        char az_letter = wheel_accelerating() ? list_sel_initial() : 0;
+
         /* Render the current screen (skipped entirely when the screen is off —
          * saves the IRQ-masked present while music plays dark). Now Playing
          * repaints ~1/s for the clock; menus/browser only on change. */
@@ -3610,7 +3858,7 @@ _Noreturn static void run_ui(fat32_t *fs)
                 np_vol_prev = vol_active;
                 player_note_presented();
             }
-        } else if (dirty) {
+        } else if (dirty || az_letter != az_prev) {
             /* Repaints are paced by what the LAST present actually cost (see
              * present_gap_us), not by a fixed 150 ms: a selection move now
              * repaints two rows and pushes only those, so it can run several
@@ -3625,8 +3873,10 @@ _Noreturn static void run_ui(fat32_t *fs)
                 /* Selection moved and nothing else did? Repaint the two rows
                  * (plus the header count + scrollbar) instead of clearing and
                  * redrawing the panel. Anything else falls through to the full
-                 * render, which console_clear marks as whole-screen damage. */
-                if (!list_repaint_partial()) {
+                 * render, which console_clear marks as whole-screen damage. The
+                 * A-Z plate covers arbitrary rows, so while it is up (or in the
+                 * frame that clears it) the full render is the honest option. */
+                if (az_letter || az_prev || !list_repaint_partial()) {
                     switch (scr_cur()) {
                     case SCR_MENU:    main_menu_render();            break;
                     case SCR_MUSIC:   music_menu_render();           break;
@@ -3643,8 +3893,10 @@ _Noreturn static void run_ui(fat32_t *fs)
                     default: break;                 /* NOWPLAYING handled above */
                     }
                 }
+                if (az_letter) az_overlay_render(az_letter);
                 ui_present_damage();
                 list_paint_note();
+                az_prev = az_letter;
                 dirty = 0;
                 last_present = now;
             }
@@ -3748,6 +4000,18 @@ _Noreturn static void run_ui(fat32_t *fs)
                 }
                 last_chip = nowc;
             }
+        }
+
+        /* While PLAYING, a pass that did nothing — no decode work, no repaint —
+         * used to free-spin the core at 80 MHz, re-polling the wheel (which masks
+         * and unmasks IRQs) thousands of times a second. Halt instead. The halt
+         * is 200 us, NOT milliseconds: the countdown is not documented to wake on
+         * an interrupt, and the audio DMA ISR has only the ~363 us I2S FIFO of
+         * slack — 200 us stays inside that budget while still parking the core
+         * for the overwhelming majority of an idle pass. Input is latched by the
+         * tick ISR and every animation here ticks at >= 33 ms, so nothing is lost. */
+        if (player_active() && !dirty && pump_us < 200u) {
+            cpu_wait_us(200);
         }
 
         /* Only throttle when idle; while playing, player_pump's decode_step
