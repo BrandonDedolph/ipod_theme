@@ -24,15 +24,18 @@ func TestFetchSmoke(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	bytes, srcURL, err := f.Fetch(ctx, "Aphex Twin")
+	bytes, src, err := f.Fetch(ctx, "Aphex Twin")
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	if len(bytes) < 1024 {
-		t.Errorf("suspiciously small image: %d bytes from %s", len(bytes), srcURL)
+		t.Errorf("suspiciously small image: %d bytes from %s", len(bytes), src.URL)
 	}
-	if srcURL == "" {
+	if src.URL == "" {
 		t.Errorf("empty source URL")
 	}
-	t.Logf("got %d bytes from %s", len(bytes), srcURL)
+	if src.Provider == ProviderUnknown {
+		t.Errorf("unclassified provider for %s — provenance would be unusable", src.URL)
+	}
+	t.Logf("got %d bytes from %s (%s: %s)", len(bytes), src.URL, src.Provider, src.License)
 }

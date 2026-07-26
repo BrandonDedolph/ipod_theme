@@ -1,34 +1,60 @@
-// Package artistart fetches artist photos from open-source music
-// databases for the binary tagcache.
+// Package artistart fetches artist photos from public music databases
+// for the host-side tagcache.
 //
-// Chain (all free, no API keys, all rate-limited):
+// This is opt-in (`core tagcache build --fetch-art`) and local-only. The
+// images it retrieves are third-party works under third-party terms —
+// see LICENSING below — and must never be bundled into a release
+// artifact.
 //
-//  1. MusicBrainz artist search        artist name  -> MBID
-//  2. MusicBrainz artist lookup        MBID         -> Wikidata QID (via url-rels)
-//  3. Wikidata entity data             QID          -> Wikimedia Commons filename (P18)
-//  4. Wikimedia Commons file URL       filename     -> actual image URL
-//  5. HTTP GET that URL                              -> JPEG/PNG bytes
+// Chain:
 //
-// The MB API rate-limits to 1 req/sec per User-Agent. A library of 50
-// artists therefore takes at minimum ~100 seconds of MB calls (search +
-// lookup), plus a few hundred ms each for the Wikipedia / Commons
-// hops. Plan for a few minutes per fresh fetch; cache aggressively.
+//  1. Deezer artist search             artist name  -> picture URL
+//  2. MusicBrainz artist search        artist name  -> MBID
+//  3. MusicBrainz artist lookup        MBID         -> Wikidata QID (via url-rels)
+//  4. Wikidata entity data             QID          -> Wikimedia Commons filename (P18)
+//  5. Wikimedia Commons file URL       filename     -> actual image URL
+//  6. HTTP GET that URL                             -> JPEG/PNG bytes
+//
+// Every request — Deezer, MusicBrainz, Wikidata, Commons, and the image
+// downloads — is paced by one shared per-host limiter (see ratelimit.go)
+// and retried with bounded exponential backoff on 429/5xx/timeout,
+// honoring Retry-After. MusicBrainz's stated budget is 1 req/sec;
+// Deezer's is roughly 50 requests per 5 seconds per IP. Plan for a few
+// minutes per fresh fetch of a large library; cache aggressively.
+//
+// # LICENSING
+//
+// Nothing this package downloads is ours, and most of it is not freely
+// licensed:
+//
+//   - Deezer's picture_big is label / press imagery served under
+//     Deezer's API terms. It is not under a free license and may not be
+//     redistributed.
+//   - Wikimedia Commons images are mostly CC BY-SA, which permits reuse
+//     but *requires* attribution and share-alike.
+//
+// So each cached image is stored with a provenance sidecar recording
+// the source URL, provider and license terms (see Source and
+// CachedProvenance). This project ships Apache-2.0 cleanroom code; an
+// index full of unattributed third-party photos would be a real
+// licensing hazard, and the sidecar is what makes the obligation
+// auditable rather than invisible.
 //
 // Design choices:
 //
-//   - We do not require an API key anywhere. MusicBrainz, Wikidata, and
-//     Commons are all free + token-less; trading the polish of keyed
-//     APIs (Last.fm, Spotify, fanart.tv) for a simpler distribution
-//     story.
+//   - We do not require an API key anywhere. Deezer, MusicBrainz,
+//     Wikidata, and Commons are all free + token-less; trading the
+//     polish of keyed APIs (Last.fm, Spotify, fanart.tv) for a simpler
+//     distribution story.
 //   - The User-Agent string identifies us per MusicBrainz's policy so
 //     we don't get rate-limit-blocked harder than usual. Bump the
 //     version when the project name changes.
-//   - The fetcher returns raw image bytes (whatever Commons serves —
+//   - The fetcher returns raw image bytes (whatever the source serves —
 //     typically JPEG, sometimes PNG). Callers downscale + recompress
-//     before storing into the .tcdb.
-//   - Failures are not fatal: an artist with no MB match, no Wikidata
-//     link, or no Commons image returns ErrNotFound and the build
-//     continues. The user sees fewer artist thumbs, not a build break.
+//     before storing.
+//   - Failures are not fatal: an artist with no match anywhere returns
+//     ErrNotFound and the build continues. The user sees fewer artist
+//     thumbs, not a build break.
 package artistart
 
 import (
@@ -55,36 +81,33 @@ var ErrNotFound = errors.New("artistart: not found")
 // runs.
 const userAgent = "core-tagcache/0.1 (https://github.com/BrandonDedolph/ipod_theme)"
 
-// Fetcher serializes calls to MB through a 1-req/sec ticker (their
-// stated rate limit). Wikidata / Commons aren't rate-limited as
-// aggressively but go through the same client to share the http
-// connection pool and timeouts.
+// Fetcher runs the fetch chain. Every outbound request shares one
+// per-host rate limiter and one http.Client (hence one connection pool
+// and one timeout budget).
 type Fetcher struct {
-	HTTP *http.Client
-	tick *time.Ticker
+	HTTP  *http.Client
+	limit *limiter
 }
 
-// NewFetcher returns a Fetcher with sensible defaults: 30 s overall
-// HTTP timeout, MB requests paced at 1/sec.
+// NewFetcher returns a Fetcher with sensible defaults: 30 s per-request
+// HTTP timeout and per-host pacing per hostIntervals.
 func NewFetcher() *Fetcher {
 	return &Fetcher{
-		HTTP: &http.Client{Timeout: 30 * time.Second},
-		tick: time.NewTicker(time.Second),
+		HTTP:  &http.Client{Timeout: 30 * time.Second},
+		limit: newLimiter(),
 	}
 }
 
-// Close releases the rate-limit ticker. Idempotent.
+// Close releases pooled connections. Idempotent.
 func (f *Fetcher) Close() {
-	if f.tick != nil {
-		f.tick.Stop()
-		f.tick = nil
+	if f.HTTP != nil {
+		f.HTTP.CloseIdleConnections()
 	}
 }
 
 // Fetch runs the full chain for `artistName` and returns the raw image
-// bytes the source served, plus that source's URL (for logging /
-// cache keys). Returns ErrNotFound when every available source comes
-// up empty.
+// bytes the source served, plus that image's provenance. Returns
+// ErrNotFound when every available source comes up empty.
 //
 // Order of attempts:
 //
@@ -95,42 +118,45 @@ func (f *Fetcher) Close() {
 //
 // Either source can fail without aborting; we only return the
 // originating error when *both* paths fail.
-func (f *Fetcher) Fetch(ctx context.Context, artistName string) ([]byte, string, error) {
+//
+// The returned Source is not decoration: the two paths carry materially
+// different reuse terms (see the package LICENSING notes), and callers
+// are expected to persist it alongside the bytes.
+func (f *Fetcher) Fetch(ctx context.Context, artistName string) ([]byte, Source, error) {
 	if imgURL, err := f.fetchDeezer(ctx, artistName); err == nil {
 		bytes, derr := f.httpGet(ctx, imgURL)
 		if derr == nil {
-			return bytes, imgURL, nil
+			return bytes, SourceFor(imgURL), nil
 		}
 		/* Download failure on a Deezer URL — surprising but possible
 		 * (CDN hiccup). Fall through to MB rather than giving up. */
 	}
 	mbid, err := f.searchMBID(ctx, artistName)
 	if err != nil {
-		return nil, "", fmt.Errorf("mb search %q: %w", artistName, err)
+		return nil, Source{}, fmt.Errorf("mb search %q: %w", artistName, err)
 	}
 	qid, err := f.lookupWikidataQID(ctx, mbid)
 	if err != nil {
-		return nil, "", fmt.Errorf("mb lookup mbid=%s: %w", mbid, err)
+		return nil, Source{}, fmt.Errorf("mb lookup mbid=%s: %w", mbid, err)
 	}
 	filename, err := f.wikidataImageFilename(ctx, qid)
 	if err != nil {
-		return nil, "", fmt.Errorf("wikidata qid=%s: %w", qid, err)
+		return nil, Source{}, fmt.Errorf("wikidata qid=%s: %w", qid, err)
 	}
 	imgURL, err := f.commonsImageURL(ctx, filename)
 	if err != nil {
-		return nil, "", fmt.Errorf("commons file=%s: %w", filename, err)
+		return nil, Source{}, fmt.Errorf("commons file=%s: %w", filename, err)
 	}
 	bytes, err := f.httpGet(ctx, imgURL)
 	if err != nil {
-		return nil, imgURL, fmt.Errorf("download %s: %w", imgURL, err)
+		return nil, SourceFor(imgURL), fmt.Errorf("download %s: %w", imgURL, err)
 	}
-	return bytes, imgURL, nil
+	return bytes, SourceFor(imgURL), nil
 }
 
 // searchMBID asks MB for the artist's MBID. Picks the top score match;
 // MB's scoring is reasonably accurate for canonical names.
 func (f *Fetcher) searchMBID(ctx context.Context, name string) (string, error) {
-	f.waitMB(ctx)
 	q := url.Values{}
 	q.Set("query", "artist:"+name)
 	q.Set("fmt", "json")
@@ -167,7 +193,6 @@ func (f *Fetcher) searchMBID(ctx context.Context, name string) (string, error) {
 // lookupWikidataQID fetches the artist's external relationships and
 // extracts the wikidata QID (a Q-prefixed integer like Q23426).
 func (f *Fetcher) lookupWikidataQID(ctx context.Context, mbid string) (string, error) {
-	f.waitMB(ctx)
 	u := "https://musicbrainz.org/ws/2/artist/" + mbid + "?fmt=json&inc=url-rels"
 	body, err := f.httpGet(ctx, u)
 	if err != nil {
@@ -301,37 +326,89 @@ func (f *Fetcher) httpGet(ctx context.Context, u string) ([]byte, error) {
 	return f.do(req)
 }
 
-// do executes a prepared request and returns the body bytes. Shared
-// by httpGet (which sets the UA) and the Spotify path (which sets
-// Authorization on top of the UA). Non-2xx responses become errors.
+// maxResponseBytes caps how much we will read from any one response.
+// Nothing in this chain is legitimately large: the JSON payloads are
+// kilobytes and the images are a few hundred KB. Without a cap, a
+// misrouted or hostile response can drive an unbounded allocation.
+//
+// A var rather than a const so tests can shrink it.
+var maxResponseBytes int64 = 16 << 20
+
+// errResponseTooLarge is returned when a response exceeds maxResponseBytes.
+var errResponseTooLarge = errors.New("artistart: response exceeds size limit")
+
+// do executes a prepared request, pacing it against the per-host rate
+// limiter and retrying transient failures with bounded exponential
+// backoff. Non-2xx responses become errors.
+//
+// All requests go through here, which is the point: previously only the
+// two MusicBrainz calls were paced, and a 429 from Deezer was flattened
+// into a generic error with no Retry-After handling, no backoff and no
+// retry — and unlike ErrNotFound those failures are not cached, so
+// every rebuild re-failed identically.
 func (f *Fetcher) do(req *http.Request) ([]byte, error) {
-	resp, err := f.HTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode/100 != 2 {
-		snippet := string(body)
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
+	ctx := req.Context()
+	host := req.URL.Hostname()
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if f.limit != nil {
+			if err := f.limit.wait(ctx, host); err != nil {
+				return nil, err
+			}
 		}
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, snippet)
+		body, status, retryAfter, err := f.attempt(req.Clone(ctx))
+		switch {
+		case err == nil && status/100 == 2:
+			return body, nil
+		case err != nil:
+			lastErr = err
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if !retryableErr(err) {
+				return nil, err
+			}
+		default:
+			snippet := string(body)
+			if len(snippet) > 200 {
+				snippet = snippet[:200]
+			}
+			lastErr = fmt.Errorf("http %d: %s", status, snippet)
+			if !retryableStatus(status) {
+				return nil, lastErr
+			}
+			// A Retry-After applies to the whole host, not just this
+			// request; push everyone else's next slot out too.
+			if f.limit != nil && retryAfter > 0 {
+				f.limit.penalize(host, retryAfter)
+			}
+		}
+		if attempt == maxAttempts {
+			break
+		}
+		if err := sleepCtx(ctx, backoffFor(attempt, retryAfter)); err != nil {
+			return nil, err
+		}
 	}
-	return body, nil
+	return nil, fmt.Errorf("%s: giving up after %d attempts: %w", host, maxAttempts, lastErr)
 }
 
-// waitMB blocks until the next MB rate-limit slot opens. Honors ctx
-// cancellation so callers can abort a long fetch run cleanly.
-func (f *Fetcher) waitMB(ctx context.Context) {
-	if f.tick == nil {
-		return
+// attempt performs one request round trip, reading at most
+// maxResponseBytes of the body.
+func (f *Fetcher) attempt(req *http.Request) (body []byte, status int, retryAfter time.Duration, err error) {
+	resp, err := f.HTTP.Do(req)
+	if err != nil {
+		return nil, 0, 0, err
 	}
-	select {
-	case <-f.tick.C:
-	case <-ctx.Done():
+	defer resp.Body.Close()
+	body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return nil, resp.StatusCode, 0, err
 	}
+	if int64(len(body)) > maxResponseBytes {
+		return nil, resp.StatusCode, 0, fmt.Errorf("%w (%d bytes) from %s",
+			errResponseTooLarge, maxResponseBytes, req.URL.Host)
+	}
+	return body, resp.StatusCode, parseRetryAfter(resp.Header.Get("Retry-After")), nil
 }
