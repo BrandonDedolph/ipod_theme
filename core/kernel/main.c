@@ -2351,6 +2351,42 @@ static const uint16_t *np_art_120(void)
     return g_np_art;
 }
 
+/* Now-playing TRANSPORT strip: the elapsed / −remaining times and the progress
+ * bar, i.e. everything that changes once a second. Split out of the full
+ * renderer because the rest of the screen (art + metadata) only changes on a
+ * track change: the clock tick redraws THIS band and presents only it, instead
+ * of clearing the framebuffer, re-blitting the 120x120 cover and rebuilding
+ * every metadata string every second and discarding all of it above y=128. */
+#define NP_TR_Y 184                        /* transport band top                 */
+#define NP_TR_H (LCD_HEIGHT - NP_TR_Y)     /* ...to the bottom of the panel      */
+
+static void nowplaying_transport_render(uint32_t elapsed_s, uint32_t total_s)
+{
+    console_fill_rect(0, NP_TR_Y, LCD_WIDTH, NP_TR_H, LINEN_SURFACE);
+
+    char te[FMT_TIME_MAX], tr[FMT_TIME_MAX + 1];   /* tr carries a '-' prefix */
+    fmt_time(te, elapsed_s);
+    uint32_t rem = (total_s > elapsed_s) ? total_s - elapsed_s : 0;
+    tr[0] = '-';
+    fmt_time(tr + 1, rem);                             /* "−M:SS" remaining     */
+    ui_text(18, 198, te, FONT_SUB, LINEN_MUTED_D);
+    int wtr = text_width(tr, FONT_SUB);
+    ui_text(LCD_WIDTH - 18 - wtr, 198, tr, FONT_SUB, LINEN_MUTED_D);
+
+    /* Taller rounded-cap bar (INK fill on a faint ink track, Theme1Live fg).
+     * bh 8 with AA pill caps reads smoother than the old 6px integer-stepped
+     * caps. */
+    int pbx = 18, by = 209, bw = LCD_WIDTH - 36, bh = 8;
+    fill_round_rect_aa(pbx, by, bw, bh, bh / 2, LINEN_TRK);
+    int fw = (total_s > 0) ? (int)((elapsed_s * (uint32_t)bw) / total_s) : 0;
+    if (fw > bw) fw = bw;
+    if (fw >= bh) {
+        fill_round_rect_aa(pbx, by, fw, bh, bh / 2, LINEN_INK);
+    } else if (fw > 0) {
+        console_fill_rect(pbx, by, fw, bh, LINEN_INK);
+    }
+}
+
 /* Now-playing (Linen, interactive-ipod.jsx Theme1Live): a top status row
  * ("Now Playing"/"Paused" + shuffle/repeat + battery), then 88x88 art on the
  * LEFT with a metadata column to its right (SONG N OF M / title / artist /
@@ -2433,41 +2469,13 @@ static void nowplaying_render(const char *name, uint32_t elapsed_s,
         ui_text_clip(mx, 130, m->album, FONT_SUB, LINEN_MUTED2, mx, mr);
     }
 
-    /* --- times + a bigger, rounded progress bar centred in the lower band --- */
-    char te[FMT_TIME_MAX], tr[FMT_TIME_MAX + 1];   /* tr carries a '-' prefix */
-    fmt_time(te, elapsed_s);
-    uint32_t rem = (total_s > elapsed_s) ? total_s - elapsed_s : 0;
-    tr[0] = '-';
-    fmt_time(tr + 1, rem);                             /* "−M:SS" remaining     */
-    ui_text(18, 198, te, FONT_SUB, LINEN_MUTED_D);
-    int wtr = text_width(tr, FONT_SUB);
-    ui_text(LCD_WIDTH - 18 - wtr, 198, tr, FONT_SUB, LINEN_MUTED_D);
-
-    /* Taller rounded-cap bar (INK fill on a faint ink track, Theme1Live fg).
-     * bh 8 with AA pill caps reads smoother than the old 6px integer-stepped
-     * caps. */
-    int pbx = 18, by = 209, bw = LCD_WIDTH - 36, bh = 8;
-    fill_round_rect_aa(pbx, by, bw, bh, bh / 2, LINEN_TRK);
-    int fw = (total_s > 0) ? (int)((elapsed_s * (uint32_t)bw) / total_s) : 0;
-    if (fw > bw) fw = bw;
-    if (fw >= bh) {
-        fill_round_rect_aa(pbx, by, fw, bh, bh / 2, LINEN_INK);
-    } else if (fw > 0) {
-        console_fill_rect(pbx, by, fw, bh, LINEN_INK);
-    }
+    nowplaying_transport_render(elapsed_s, total_s);
 
     /* Volume overlay rides on top for ~1.5 s after a wheel adjustment. */
     if (ui_window_up(&g_vol_show, VOL_SHOW_US, mmio_read32(USEC_TIMER_ADDR))) {
         volume_overlay_render(g_volume);
     }
 }
-
-/* Now-playing animated strip: the album art (y 8..128) is static for a track,
- * so we full-present it once then partial-present only this lower band each
- * second — shrinking the IRQ-masked pixel push (relies on the BCM persisting
- * the un-repainted art region across a partial LCD_UPDATE). */
-#define NP_ANIM_Y 128
-#define NP_ANIM_H 112
 
 /* ---------------------------------------------------------------------------
  * Menus (main + Music sub-menu)
@@ -2627,6 +2635,227 @@ static void detail_load_meta(fat32_t *fs)
         }
         g_det_view[g_det_view_n++] = (int16_t)i;
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Presenting: damage-only pushes + partial list repaints
+ *
+ * lcd_present_fb streams all 38,400 32-bit words to the BCM with IRQs MASKED —
+ * the audio DMA is single-shot and re-kicked inside its own ISR, so only the
+ * 16-frame I2S FIFO (~363 us) covers a delayed interrupt. Pushing a whole frame
+ * to move a selection bar one row is what forced the old fixed 150 ms repaint
+ * throttle while playing. So: renderers report what they touched (console.c's
+ * damage rect), we present only that, and a plain selection move repaints two
+ * rows instead of clearing and redrawing the panel.
+ * ------------------------------------------------------------------------- */
+
+/* Measured cost of the last present, used to pace the next one. Seeded to a
+ * full-frame-ish value so the first push is paced conservatively. */
+static uint32_t g_present_cost_us = 30000u;
+
+/* Present whatever has been drawn since the last console_damage_reset(), then
+ * clear the damage. A full-screen damage rect (any console_clear) goes out via
+ * the full-frame fast path, exactly as before. */
+static void ui_present_damage(void)
+{
+    int x, y, w, h;
+    if (console_damage_get(&x, &y, &w, &h)) {
+        uint32_t t0 = mmio_read32(USEC_TIMER_ADDR);
+        if (x <= 0 && y <= 0 && w >= LCD_WIDTH && h >= LCD_HEIGHT) {
+            lcd_present_fb(console_framebuffer());
+        } else {
+            lcd_present_rect(console_framebuffer(), x, y, w, h);
+        }
+        g_present_cost_us = mmio_read32(USEC_TIMER_ADDR) - t0;
+    }
+    console_damage_reset();
+}
+
+/* How long to wait between repaints WHILE PLAYING. Self-tuning: keep the
+ * IRQ-masked pixel push under ~1/4 of the loop's time by spacing repaints at
+ * ~4x what the last one actually cost. A cheap partial present paces fast (a
+ * responsive wheel), a full-frame push still backs off to about the old fixed
+ * 150 ms — but only when it really is a full frame. */
+static uint32_t present_gap_us(void)
+{
+    uint32_t gap = g_present_cost_us * 4u;
+    if (gap < 20000u)  gap = 20000u;      /* <=50 fps: no point going faster    */
+    if (gap > 150000u) gap = 150000u;     /* the old worst-case throttle        */
+    return gap;
+}
+
+/* A list screen described generically, so one routine can repaint the rows that
+ * changed without knowing which screen it is. `row` draws list row r showing
+ * item `idx` (it reads that screen's own selection to decide highlighting). */
+typedef struct {
+    const char *title;                 /* header title (for the overlap check) */
+    int         count, visible, rh, y0, sel;
+    void      (*row)(int r, int idx);
+    char        right[16];             /* header "n / m" value ("" = none)     */
+} list_view_t;
+
+/* Describe the screen on top of the stack, or return 0 if it isn't a list that
+ * can be partially repainted (Settings/Charging/Now Playing render elsewhere,
+ * empty lists draw a placeholder instead of rows). */
+static int list_view_current(list_view_t *v)
+{
+    v->right[0] = '\0';
+    v->rh       = ROW_H;
+    v->y0       = LIST_Y0;
+    v->visible  = LIST_ROWS;
+    switch (scr_cur()) {
+    case SCR_MENU:
+        g_menu_items = g_main_menu;
+        g_menu_sel   = g_main_sel;
+        v->title = "Core";
+        v->count = main_menu_count();
+        v->sel   = g_main_sel;
+        v->row   = menu_row_draw;
+        break;
+    case SCR_MUSIC:
+        g_menu_items = g_music_menu;
+        g_menu_sel   = g_music_sel;
+        v->title = "Music";
+        v->count = MU_COUNT;
+        v->sel   = g_music_sel;
+        v->row   = menu_row_draw;
+        break;
+    case SCR_ARTISTS:
+        v->title = "Artists";
+        v->count = g_artists_n;
+        v->sel   = g_artist_sel;
+        v->row   = artists_row_draw;
+        fmt_count(v->right, v->sel + 1, v->count);
+        break;
+    case SCR_SONGS:
+        v->title   = "Songs";
+        v->count   = g_songview_n;
+        v->sel     = g_song_sel;
+        v->row     = songs_row_draw;
+        v->rh      = ROW_H2;
+        v->visible = LIST_ROWS2;
+        fmt_count(v->right, v->sel + 1, v->count);
+        break;
+    case SCR_GENRES:
+        v->title = "Genres";
+        v->count = g_genres_n;
+        v->sel   = g_genre_sel;
+        v->row   = genres_row_draw;
+        fmt_count(v->right, v->sel + 1, v->count);
+        break;
+    case SCR_QUEUE:
+        v->title = "Now Playing";
+        v->count = player_queue_len();
+        v->sel   = g_queue_sel;
+        v->row   = queue_row_draw;
+        fmt_count(v->right, player_queue_current() + 1, v->count);
+        break;
+    case SCR_BROWSER:
+        if (g_dir_depth == 0) {
+            v->title   = g_artist_filter[0] ? g_artist_filter : "Albums";
+            v->count   = g_albumview_n;
+            v->sel     = g_br_sel;
+            v->row     = albumlist_row_draw;
+            v->rh      = ROW_H2;
+            v->visible = LIST_ROWS2;
+            fmt_count(v->right, v->sel + 1, v->count);
+        } else {
+            /* The tracklist scrolls over the DISPLAY view (tracks interleaved
+             * with "Disc N" headers), so the row space is view indices. */
+            v->title   = "Albums";
+            v->count   = g_det_view_n;
+            v->sel     = detail_sel_view(g_det_sel);
+            v->row     = detail_row_draw;
+            v->y0      = DET_LIST_Y0;
+            v->visible = DET_ROWS;
+            fmt_count(v->right, g_det_sel + 1, g_browse_n > 0 ? g_browse_n : 1);
+        }
+        break;
+    default:
+        return 0;
+    }
+    return v->count > 0;
+}
+
+/* What the last paint showed, so the next one can tell a plain selection move
+ * from a change that needs the whole panel. `chrome` fingerprints the shared
+ * furniture (status strip name, battery, lock, playing row) — if any of it
+ * moved, a two-row repaint would leave the screen stale. */
+static struct {
+    int      valid, scr, depth, sel, top, count, right_w;
+    uint32_t chrome;
+} g_lp;
+
+static uint32_t chrome_key(void)
+{
+    uint32_t k = player_active() ? 1u : 0u;
+    k = k * 31u + (player_paused() ? 1u : 0u);
+    k = k * 31u + (uint32_t)(player_queue_current() + 1);
+    k = k * 31u + (uint32_t)(g_locked ? 1 : 0);
+    k = k * 31u + (uint32_t)(g_bat_pct + 1);
+    return k;
+}
+
+/* Record what we just painted (called after every paint of a list screen). */
+static void list_paint_note(void)
+{
+    list_view_t v;
+    if (!list_view_current(&v)) {
+        g_lp.valid = 0;
+        return;
+    }
+    g_lp.valid   = 1;
+    g_lp.scr     = (int)scr_cur();
+    g_lp.depth   = g_dir_depth;
+    g_lp.sel     = v.sel;
+    g_lp.count   = v.count;
+    g_lp.top     = scroll_window(v.sel, v.count, v.visible);
+    g_lp.right_w = v.right[0] ? text_width(v.right, FONT_SMALL) : 0;
+    g_lp.chrome  = chrome_key();
+}
+
+/* Repaint the current screen by redrawing ONLY what a selection move changed:
+ * the two affected rows, the header's "n / m" value and the scrollbar. Returns
+ * 0 when that isn't provably sufficient (different screen, scrolled window,
+ * changed contents or chrome) — the caller then does the full render. */
+static int list_repaint_partial(void)
+{
+    list_view_t v;
+    if (!g_lp.valid || !list_view_current(&v)) return 0;
+    if (g_lp.scr != (int)scr_cur() || g_lp.depth != g_dir_depth) return 0;
+    if (g_lp.count != v.count || g_lp.chrome != chrome_key())    return 0;
+    if (v.sel == g_lp.sel)                                       return 0;
+    int top = scroll_window(v.sel, v.count, v.visible);
+    if (top != g_lp.top) return 0;        /* window scrolled: every row moved   */
+
+    int r_old = g_lp.sel - top, r_new = v.sel - top;
+    if (r_old < 0 || r_old >= v.visible || r_new < 0 || r_new >= v.visible) {
+        return 0;                          /* off-window selection: play it safe */
+    }
+
+    /* Header value: clear only as wide as the old/new text. If the title reaches
+     * into that box, the clear would eat it — fall back to a full paint. */
+    int rw = v.right[0] ? text_width(v.right, FONT_SMALL) : 0;
+    int cw = ((rw > g_lp.right_w) ? rw : g_lp.right_w) + 4;
+    if (cw > 4) {
+        int cx = LCD_WIDTH - 12 - cw;
+        if (12 + 20 + text_width(v.title, FONT_HEADER) > cx) return 0;
+        console_fill_rect(cx, HDR_BASE - 12, cw, 16, LINEN_SURFACE);
+        if (rw) {
+            ui_text(LCD_WIDTH - 12 - rw, HDR_BASE - 1, v.right, FONT_SMALL,
+                    LINEN_MUTED2);
+        }
+    }
+
+    /* The two rows: clear the band (the new content may be narrower) + redraw. */
+    for (int k = 0; k < 2; k++) {
+        int r = k ? r_new : r_old;
+        console_fill_rect(0, v.y0 + r * v.rh, LCD_WIDTH, v.rh, LINEN_SURFACE);
+        int idx = top + r;
+        if (idx < v.count) v.row(r, idx);
+    }
+    scrollbar_render(v.y0, top, v.visible, v.count);
+    return 1;
 }
 
 /* Busy-wait `us` microseconds (PWM already off) — for the silent gap in the
@@ -2815,7 +3044,6 @@ _Noreturn static void run_ui(fat32_t *fs)
     uint32_t np_last = 0xFFFFFFFFu;
     int      np_first = 1;
     int      np_vol_prev = 0;            /* volume overlay was up last NP paint  */
-    int      np_track = -1;              /* queue index shown last NP full paint */
     uint32_t last_present = 0;           /* rate-limit UI presents while playing */
     uint32_t last_bars = 0;              /* rate-limit the now-playing bar anim  */
     uint32_t last_chip = 0;              /* rate-limit album-cover chip loads    */
@@ -3347,72 +3575,76 @@ _Noreturn static void run_ui(fat32_t *fs)
             int vol_active = ui_window_up(&g_vol_show, VOL_SHOW_US, nowv);
             int expiring   = np_vol_prev && !vol_active;   /* overlay just faded */
 
-            /* Auto-advance changes the track WITHOUT a button event; the art +
-             * metadata live above the partial-present band, so force one full
-             * present when the queue position moves or they'd show the previous
-             * song until the next tap. */
-            int cur_track = player_queue_current();
-            if (cur_track != np_track) {
-                np_track = cur_track;
-                dirty = 1;
-            }
-
-            /* A FULL present is needed only on a real change (dirty) or to erase
-             * the fading volume overlay (it straddles the static-art band, so a
-             * partial present can't clear it). Cap those to ~6fps while playing:
-             * back-to-back full-frame, IRQ-masked pixel pushes were starving the
-             * audio DMA ISR (BUF dropping into the red on a volume sweep). The
-             * once-a-second clock rides the cheap partial present, unthrottled. */
+            /* A FULL repaint is needed only on a real change (dirty — which the
+             * loop's track-change edge sets for us) or to erase the fading volume
+             * overlay, which straddles the static art band. Everything else is
+             * just the clock ticking: that redraws ONLY the transport strip
+             * (elapsed/remaining/progress) and presents only its band, instead of
+             * re-rendering the whole screen — art, metadata and two anti-aliased
+             * bars — once a second and throwing all of it above y=128 away. */
             int want_full = dirty || expiring;
             if (want_full) {
-                if (np_first || (uint32_t)(nowv - last_present) >= 150000u) {
+                if (np_first || !player_active() ||
+                    (uint32_t)(nowv - last_present) >= present_gap_us()) {
                     g_mq.active = 0;
+                    console_damage_reset();
                     nowplaying_render(player_track_name(), elapsed,
                                       player_total_s(), player_buf_pct());
-                    lcd_present_fb(console_framebuffer());
+                    ui_present_damage();
                     np_first = 0;
                     np_last  = elapsed;
                     np_vol_prev  = vol_active;
                     last_present = nowv;
                     player_note_presented();
                     dirty = 0;
+                    g_lp.valid = 0;             /* not a list screen */
                 }
                 /* else: throttled — keep dirty set, present in the next window */
             } else if (elapsed != np_last) {
-                g_mq.active = 0;
-                nowplaying_render(player_track_name(), elapsed,
-                                  player_total_s(), player_buf_pct());
-                lcd_present_rect(console_framebuffer(),
-                                 0, NP_ANIM_Y, LCD_WIDTH, NP_ANIM_H);
+                /* Transport only: leave the marquee registered (its own tick
+                 * keeps the title scrolling) and don't touch the art/metadata. */
+                console_damage_reset();
+                nowplaying_transport_render(elapsed, player_total_s());
+                ui_present_damage();
                 np_last = elapsed;
                 np_vol_prev = vol_active;
                 player_note_presented();
             }
         } else if (dirty) {
-            /* While a song plays, cap menu/browser repaints (~6 fps) so
-             * back-to-back full-frame presents during rapid scrolling don't keep
-             * IRQs masked long enough to starve the audio DMA ISR. Idle → present
-             * immediately for a snappy UI. `dirty` stays set until we present, so
-             * the latest scroll position is what lands. */
+            /* Repaints are paced by what the LAST present actually cost (see
+             * present_gap_us), not by a fixed 150 ms: a selection move now
+             * repaints two rows and pushes only those, so it can run several
+             * times faster without keeping IRQs masked long enough to starve the
+             * audio DMA ISR. Idle → present immediately. `dirty` stays set until
+             * we present, so the latest scroll position is what lands. */
             uint32_t now = mmio_read32(USEC_TIMER_ADDR);
-            if (!player_active() || (now - last_present) >= 150000u) {
+            if (!player_active() ||
+                (uint32_t)(now - last_present) >= present_gap_us()) {
                 g_mq.active = 0;
-                switch (scr_cur()) {
-                case SCR_MENU:    main_menu_render();            break;
-                case SCR_MUSIC:   music_menu_render();           break;
-                case SCR_ARTISTS: artists_render(g_artist_sel);  break;
-                case SCR_SONGS:   songs_render(g_song_sel);      break;
-                case SCR_GENRES:  genres_render(g_genre_sel);    break;
-                case SCR_BROWSER: browse_render(g_dir_depth ? g_det_sel : g_br_sel);       break;
-                case SCR_QUEUE:   queue_render(g_queue_sel);     break;
-                case SCR_SETTINGS: settings_render_cur();        break;
-                case SCR_CHARGING:
-                    screen_charging_render(g_bat_pct, power_is_charging(),
-                                           power_is_external());
-                    break;
-                default: break;                 /* NOWPLAYING handled above */
+                console_damage_reset();
+                /* Selection moved and nothing else did? Repaint the two rows
+                 * (plus the header count + scrollbar) instead of clearing and
+                 * redrawing the panel. Anything else falls through to the full
+                 * render, which console_clear marks as whole-screen damage. */
+                if (!list_repaint_partial()) {
+                    switch (scr_cur()) {
+                    case SCR_MENU:    main_menu_render();            break;
+                    case SCR_MUSIC:   music_menu_render();           break;
+                    case SCR_ARTISTS: artists_render(g_artist_sel);  break;
+                    case SCR_SONGS:   songs_render(g_song_sel);      break;
+                    case SCR_GENRES:  genres_render(g_genre_sel);    break;
+                    case SCR_BROWSER: browse_render(g_dir_depth ? g_det_sel : g_br_sel);   break;
+                    case SCR_QUEUE:   queue_render(g_queue_sel);     break;
+                    case SCR_SETTINGS: settings_render_cur();        break;
+                    case SCR_CHARGING:
+                        screen_charging_render(g_bat_pct, power_is_charging(),
+                                               power_is_external());
+                        break;
+                    default: break;                 /* NOWPLAYING handled above */
+                    }
                 }
-                lcd_present_fb(console_framebuffer());
+                ui_present_damage();
+                list_paint_note();
                 dirty = 0;
                 last_present = now;
             }
@@ -3497,14 +3729,22 @@ _Noreturn static void run_ui(fat32_t *fs)
          * (~50 covers/s) is safe and stops the old one-line-at-a-time trickle. */
         if (scr_cur() == SCR_BROWSER && g_dir_depth == 0) {
             uint32_t nowc = mmio_read32(USEC_TIMER_ADDR);
-            if (!player_active()) {
-                for (int k = 0; k < 6 && artcache_pump(fs); k++) {
-                    dirty = 1;                /* several covers per pass when idle */
+            int idle_now  = !player_active();
+            if (idle_now || (uint32_t)(nowc - last_chip) >= 60000u) {
+                /* A pumped slot is only worth a repaint if it is actually ON
+                 * SCREEN: pumping a whole library's covers used to set dirty for
+                 * every one of them, forcing ~21 consecutive full-frame repaints
+                 * for rows nobody was looking at. Snapshot the visible rows'
+                 * chips, pump, and repaint only if one of THOSE appeared. */
+                const uint16_t *before[LIST_ROWS2];
+                int vtop = scroll_window(g_br_sel, g_albumview_n, LIST_ROWS2);
+                for (int r = 0; r < LIST_ROWS2; r++) {
+                    before[r] = artcache_get(vtop + r);
                 }
-                last_chip = nowc;
-            } else if ((uint32_t)(nowc - last_chip) >= 60000u) {
-                for (int k = 0; k < 3 && artcache_pump(fs); k++) {
-                    dirty = 1;                /* small batch/tick while playing    */
+                for (int k = 0; k < (idle_now ? 6 : 3) && artcache_pump(fs); k++) {
+                }
+                for (int r = 0; r < LIST_ROWS2; r++) {
+                    if (artcache_get(vtop + r) != before[r]) dirty = 1;
                 }
                 last_chip = nowc;
             }
