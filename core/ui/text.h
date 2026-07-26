@@ -47,8 +47,9 @@ const text_font_t *text_font_bold_17(void);
  * uint16_t) at pen (x, y), where `y` is the text BASELINE, in colour
  * `ink` (RGB565). Each glyph's coverage is gamma-correctly alpha-blended
  * over whatever is already in the framebuffer. Clips to [0,fb_w)x[0,fb_h)
- * — never writes out of bounds. Non-printable / out-of-range bytes are
- * advanced by the space width and skipped.
+ * — never writes out of bounds. Control codes advance by the space width
+ * and draw nothing; a codepoint the atlas has no glyph for (CJK, Cyrillic,
+ * emoji, …) draws a hollow .notdef box, so text is never invisible.
  *
  * Returns the pen x after the string (x + sum of advances).
  */
@@ -67,7 +68,8 @@ int text_draw_clip_v(uint16_t *fb, int fb_w, int fb_h, int x, int y,
                      const char *s, const text_font_t *font, uint16_t ink,
                      int clip_x0, int clip_x1, int clip_y0, int clip_y1);
 
-/* Pixel width the string would advance, without drawing. */
+/* Pixel width the string would advance, without drawing. Always agrees with
+ * the pen the text_draw* calls return for the same string and font. */
 int text_width(const char *s, const text_font_t *font);
 
 /* Recommended row spacing (line height) for this face, in pixels. */
