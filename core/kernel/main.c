@@ -2531,15 +2531,19 @@ static void settings_render_cur(void)
          * otherwise a library that's too big just looks like it lost tracks.
          * Drawn here, over the shared About panel, in the gap between the device
          * hero (baseline 62) and the stat columns (baseline 100). */
+        /* These are INDEPENDENT: the truncation warning used to be an else-if
+         * in front of the load time, so a library that hit a cap hid the number
+         * entirely — which is exactly the library you most want the number for. */
         if (g_lib_truncated) {
-            ui_text_centered(80, "Library too large " UI_GLYPH_MIDDOT
+            ui_text_centered(78, "Library too large " UI_GLYPH_MIDDOT
                                  " some items not shown",
                              FONT_SMALL, BATT_LOW_RED);
-        } else if (g_lib_load_ms) {
+        }
+        if (g_lib_load_ms) {
             /* Boot library load time. The one long wait at startup, and it is
              * seek-bound, so having the number on screen is what makes a change
              * here verifiable rather than a matter of impression. */
-            char lt[28];
+            char lt[32];
             int  k = 0;
             for (const char *q = "Library loaded in "; *q; q++) lt[k++] = *q;
             k += u32_to_dec(lt + k, g_lib_load_ms / 1000u);
@@ -2547,7 +2551,8 @@ static void settings_render_cur(void)
             lt[k++] = (char)('0' + (g_lib_load_ms / 100u) % 10u);
             lt[k++] = 's';
             lt[k]   = '\0';
-            ui_text_centered(80, lt, FONT_SMALL, LINEN_MUTED_D);
+            ui_text_centered(g_lib_truncated ? 90 : 80, lt,
+                             FONT_SMALL, LINEN_MUTED_D);
         }
     } else {
         settings_render(g_set_screen, &g_settings, g_set_sel);
