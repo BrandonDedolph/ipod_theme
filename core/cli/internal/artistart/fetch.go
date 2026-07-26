@@ -279,7 +279,7 @@ func (f *Fetcher) commonsImageURL(ctx context.Context, filename string) (string,
 	q.Set("titles", "File:"+filename)
 	q.Set("prop", "imageinfo")
 	q.Set("iiprop", "url")
-	q.Set("iiurlwidth", "512")     /* max width; Commons returns a sized thumb */
+	q.Set("iiurlwidth", "512") /* max width; Commons returns a sized thumb */
 	q.Set("format", "json")
 	u := "https://commons.wikimedia.org/w/api.php?" + q.Encode()
 
@@ -291,8 +291,8 @@ func (f *Fetcher) commonsImageURL(ctx context.Context, filename string) (string,
 		Query struct {
 			Pages map[string]struct {
 				ImageInfo []struct {
-					URL       string `json:"url"`
-					ThumbURL  string `json:"thumburl"`
+					URL      string `json:"url"`
+					ThumbURL string `json:"thumburl"`
 				} `json:"imageinfo"`
 			} `json:"pages"`
 		} `json:"query"`

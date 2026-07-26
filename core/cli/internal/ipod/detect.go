@@ -24,8 +24,8 @@ type Generation int
 
 const (
 	GenUnknown Generation = iota
-	Gen5_30                  // 30 GB
-	Gen5_5                   // 60/80 GB ("5.5G")
+	Gen5_30               // 30 GB
+	Gen5_5                // 60/80 GB ("5.5G")
 )
 
 func (g Generation) String() string {
@@ -43,11 +43,11 @@ func (g Generation) String() string {
 type Mode int
 
 const (
-	ModeUnknown    Mode = iota
-	ModeAppleOS         // booted into Apple's firmware, USB sync mode
-	ModeAppleDisk       // Apple disk mode (Select+Play recovery)
-	ModeOurUpdate       // our firmware, in "safe to update" screen
-	ModeRockbox         // Rockbox firmware
+	ModeUnknown   Mode = iota
+	ModeAppleOS        // booted into Apple's firmware, USB sync mode
+	ModeAppleDisk      // Apple disk mode (Select+Play recovery)
+	ModeOurUpdate      // our firmware, in "safe to update" screen
+	ModeRockbox        // Rockbox firmware
 )
 
 func (m Mode) String() string {

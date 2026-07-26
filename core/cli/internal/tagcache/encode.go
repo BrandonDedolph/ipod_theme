@@ -35,14 +35,14 @@ func Build(songs []SongInfo) *Model {
 		Songs: songs,
 	}
 
-	m.UniqArtists,   m.SongArtistIdx   = uniqIndex(songs, func(s *SongInfo) string { return s.Artist })
-	m.UniqAlbums,    m.SongAlbumIdx    = uniqIndex(songs, func(s *SongInfo) string { return s.Album })
-	m.UniqGenres,    m.SongGenreIdx    = uniqIndex(songs, func(s *SongInfo) string { return s.Genre })
+	m.UniqArtists, m.SongArtistIdx = uniqIndex(songs, func(s *SongInfo) string { return s.Artist })
+	m.UniqAlbums, m.SongAlbumIdx = uniqIndex(songs, func(s *SongInfo) string { return s.Album })
+	m.UniqGenres, m.SongGenreIdx = uniqIndex(songs, func(s *SongInfo) string { return s.Genre })
 	m.UniqComposers, m.SongComposerIdx = uniqIndex(songs, func(s *SongInfo) string { return s.Composer })
 
-	m.ArtistGroups   = groupBy(len(m.UniqArtists),   m.SongArtistIdx)
-	m.AlbumGroups    = groupBy(len(m.UniqAlbums),    m.SongAlbumIdx)
-	m.GenreGroups    = groupBy(len(m.UniqGenres),    m.SongGenreIdx)
+	m.ArtistGroups = groupBy(len(m.UniqArtists), m.SongArtistIdx)
+	m.AlbumGroups = groupBy(len(m.UniqAlbums), m.SongAlbumIdx)
+	m.GenreGroups = groupBy(len(m.UniqGenres), m.SongGenreIdx)
 	m.ComposerGroups = groupBy(len(m.UniqComposers), m.SongComposerIdx)
 
 	return m
@@ -92,8 +92,8 @@ type Model struct {
 // tag is empty get -1.
 func uniqIndex(songs []SongInfo, get func(*SongInfo) string) ([]string, []int32) {
 	type entry struct{ canonical string }
-	seen := make(map[string]*entry)        // key = lowercased value
-	var values []string                    // dedup output, pre-sort
+	seen := make(map[string]*entry) // key = lowercased value
+	var values []string             // dedup output, pre-sort
 	for i := range songs {
 		v := strings.TrimSpace(get(&songs[i]))
 		if v == "" {
@@ -152,15 +152,15 @@ func (m *Model) Write(w io.Writer) error {
 	// Reserve string offsets for every per-song / uniq-table string.
 	// (Doing this up-front lets us fill song records and uniq tables
 	// in one pass.)
-	titleOffs    := make([]uint32, len(m.Songs))
-	pathOffs     := make([]uint32, len(m.Songs))
+	titleOffs := make([]uint32, len(m.Songs))
+	pathOffs := make([]uint32, len(m.Songs))
 	for i, s := range m.Songs {
 		titleOffs[i] = st.intern(s.Title)
-		pathOffs[i]  = st.intern(s.Path)
+		pathOffs[i] = st.intern(s.Path)
 	}
-	artistStrOffs   := internAll(st, m.UniqArtists)
-	albumStrOffs    := internAll(st, m.UniqAlbums)
-	genreStrOffs    := internAll(st, m.UniqGenres)
+	artistStrOffs := internAll(st, m.UniqArtists)
+	albumStrOffs := internAll(st, m.UniqAlbums)
+	genreStrOffs := internAll(st, m.UniqGenres)
 	composerStrOffs := internAll(st, m.UniqComposers)
 
 	// Art blob: concatenate every song's ArtBytes; record per-song
@@ -190,25 +190,25 @@ func (m *Model) Write(w io.Writer) error {
 	songsOff := uint64(HeaderSize)
 	songsLen := uint64(len(m.Songs)) * SongRecordSize
 
-	artistIdxOff   := songsOff       + songsLen
-	albumIdxOff    := artistIdxOff   + uint64(len(m.UniqArtists))   * 4
-	genreIdxOff    := albumIdxOff    + uint64(len(m.UniqAlbums))    * 4
-	composerIdxOff := genreIdxOff    + uint64(len(m.UniqGenres))    * 4
-	uniqEnd        := composerIdxOff + uint64(len(m.UniqComposers)) * 4
+	artistIdxOff := songsOff + songsLen
+	albumIdxOff := artistIdxOff + uint64(len(m.UniqArtists))*4
+	genreIdxOff := albumIdxOff + uint64(len(m.UniqAlbums))*4
+	composerIdxOff := genreIdxOff + uint64(len(m.UniqGenres))*4
+	uniqEnd := composerIdxOff + uint64(len(m.UniqComposers))*4
 
 	// Per-group song lists: each dimension is a flat block starting
 	// with N u32 offsets (relative to that dimension's _off), followed
 	// by [u32 count, u32 indices...] tuples.
-	artistGroupsBytes   := encodeGroups(m.ArtistGroups)
-	albumGroupsBytes    := encodeGroups(m.AlbumGroups)
-	genreGroupsBytes    := encodeGroups(m.GenreGroups)
+	artistGroupsBytes := encodeGroups(m.ArtistGroups)
+	albumGroupsBytes := encodeGroups(m.AlbumGroups)
+	genreGroupsBytes := encodeGroups(m.GenreGroups)
 	composerGroupsBytes := encodeGroups(m.ComposerGroups)
 
-	artistGroupsOff   := uniqEnd
-	albumGroupsOff    := artistGroupsOff   + uint64(len(artistGroupsBytes))
-	genreGroupsOff    := albumGroupsOff    + uint64(len(albumGroupsBytes))
-	composerGroupsOff := genreGroupsOff    + uint64(len(genreGroupsBytes))
-	groupsEnd         := composerGroupsOff + uint64(len(composerGroupsBytes))
+	artistGroupsOff := uniqEnd
+	albumGroupsOff := artistGroupsOff + uint64(len(artistGroupsBytes))
+	genreGroupsOff := albumGroupsOff + uint64(len(albumGroupsBytes))
+	composerGroupsOff := genreGroupsOff + uint64(len(genreGroupsBytes))
+	groupsEnd := composerGroupsOff + uint64(len(composerGroupsBytes))
 
 	stringsOff := groupsEnd
 	stringsBytes := st.bytes()
@@ -235,7 +235,7 @@ func (m *Model) Write(w io.Writer) error {
 		}
 		artistArtBlob.Write(b)
 	}
-	artistArtIdxOff  := artOff + artLen
+	artistArtIdxOff := artOff + artLen
 	artistArtBlobOff := artistArtIdxOff + uint64(len(m.UniqArtists))*16
 	artistArtBlobLen := uint64(artistArtBlob.Len())
 

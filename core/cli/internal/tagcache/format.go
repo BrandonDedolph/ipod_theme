@@ -77,8 +77,8 @@
 //
 // Songs are sorted alphabetically by title (case-insensitive). Uniq
 // tables are sorted alphabetically. Per-group song-list orders match
-// the global song order, so the firmware can present the same drilldown
-// rows whether it reads from the binary cache or scan-at-startup.
+// the global song order, so a reader can present a drilldown as a slice
+// of the song array rather than a filter over it.
 //
 // Songs are keyed by their host absolute path (SongInfo.Path). That is
 // one of several reasons this format could not be handed to the device
@@ -142,14 +142,14 @@ var LE = binary.LittleEndian
 // Header mirrors the on-disk layout of the fixed header. Fields are
 // populated by Builder.Write and verified by Reader.
 type Header struct {
-	Magic       [4]byte
-	Version     uint32
-	SongCount   uint32
-	NArtists    uint32
-	NAlbums     uint32
-	NGenres     uint32
-	NComposers  uint32
-	SongsOff    uint64
+	Magic      [4]byte
+	Version    uint32
+	SongCount  uint32
+	NArtists   uint32
+	NAlbums    uint32
+	NGenres    uint32
+	NComposers uint32
+	SongsOff   uint64
 
 	ArtistIdxOff   uint64
 	AlbumIdxOff    uint64
@@ -178,12 +178,12 @@ type Header struct {
 // when the file had no embedded picture; otherwise ArtOff is relative
 // to the file's ArtOff.
 type SongRecord struct {
-	TitleOff     uint32
-	PathOff      uint32
-	ArtistIdx    int32
-	AlbumIdx     int32
-	GenreIdx     int32
-	ComposerIdx  int32
-	ArtOff       uint64
-	ArtLen       uint64
+	TitleOff    uint32
+	PathOff     uint32
+	ArtistIdx   int32
+	AlbumIdx    int32
+	GenreIdx    int32
+	ComposerIdx int32
+	ArtOff      uint64
+	ArtLen      uint64
 }

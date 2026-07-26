@@ -99,9 +99,9 @@ func dedupeSongs(songs []SongInfo) []SongInfo {
 	seen := make(map[string]seenEntry, len(songs))
 	out := songs[:0]
 	for _, s := range songs {
-		title  := strings.ToLower(strings.TrimSpace(s.Title))
+		title := strings.ToLower(strings.TrimSpace(s.Title))
 		artist := strings.ToLower(strings.TrimSpace(s.Artist))
-		album  := strings.ToLower(strings.TrimSpace(s.Album))
+		album := strings.ToLower(strings.TrimSpace(s.Album))
 		var key string
 		if title == "" || artist == "" || album == "" {
 			/* Untagged or partially-tagged files: don't risk

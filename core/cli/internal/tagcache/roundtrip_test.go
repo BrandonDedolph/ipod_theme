@@ -16,10 +16,10 @@ func TestRoundTrip(t *testing.T) {
 	jpegB := []byte{0xff, 0xd8, 0xff, 0xe1, 9, 9}
 
 	in := []SongInfo{
-		{Path: "/m/track1.flac", Title: "Apple",   Artist: "Aphex Twin", Album: "Drukqs",  Genre: "IDM",      Composer: "Aphex Twin", ArtBytes: jpegA},
-		{Path: "/m/track2.flac", Title: "Banana",  Artist: "Aphex Twin", Album: "Drukqs",  Genre: "IDM",      Composer: "Aphex Twin", ArtBytes: jpegA},
-		{Path: "/m/track3.flac", Title: "Cherry",  Artist: "Brian Eno",  Album: "Ambient", Genre: "Ambient",  Composer: "",            ArtBytes: jpegB},
-		{Path: "/m/track4.flac", Title: "Durian",  Artist: "",            Album: "",        Genre: "",         Composer: "",            ArtBytes: nil},
+		{Path: "/m/track1.flac", Title: "Apple", Artist: "Aphex Twin", Album: "Drukqs", Genre: "IDM", Composer: "Aphex Twin", ArtBytes: jpegA},
+		{Path: "/m/track2.flac", Title: "Banana", Artist: "Aphex Twin", Album: "Drukqs", Genre: "IDM", Composer: "Aphex Twin", ArtBytes: jpegA},
+		{Path: "/m/track3.flac", Title: "Cherry", Artist: "Brian Eno", Album: "Ambient", Genre: "Ambient", Composer: "", ArtBytes: jpegB},
+		{Path: "/m/track4.flac", Title: "Durian", Artist: "", Album: "", Genre: "", Composer: "", ArtBytes: nil},
 	}
 	// Sort like Scan would.
 	want := Build(append([]SongInfo(nil), in...))
@@ -39,36 +39,62 @@ func TestRoundTrip(t *testing.T) {
 			t.Errorf("%s mismatch:\n want %v\n  got %v", label, w, g)
 		}
 	}
-	checkStrings("uniq_artists",   want.UniqArtists,   got.UniqArtists)
-	checkStrings("uniq_albums",    want.UniqAlbums,    got.UniqAlbums)
-	checkStrings("uniq_genres",    want.UniqGenres,    got.UniqGenres)
+	checkStrings("uniq_artists", want.UniqArtists, got.UniqArtists)
+	checkStrings("uniq_albums", want.UniqAlbums, got.UniqAlbums)
+	checkStrings("uniq_genres", want.UniqGenres, got.UniqGenres)
 	checkStrings("uniq_composers", want.UniqComposers, got.UniqComposers)
 
-	if !reflect.DeepEqual(want.SongArtistIdx,   got.SongArtistIdx)   { t.Errorf("song_artist_idx mismatch") }
-	if !reflect.DeepEqual(want.SongAlbumIdx,    got.SongAlbumIdx)    { t.Errorf("song_album_idx mismatch") }
-	if !reflect.DeepEqual(want.SongGenreIdx,    got.SongGenreIdx)    { t.Errorf("song_genre_idx mismatch") }
-	if !reflect.DeepEqual(want.SongComposerIdx, got.SongComposerIdx) { t.Errorf("song_composer_idx mismatch") }
+	if !reflect.DeepEqual(want.SongArtistIdx, got.SongArtistIdx) {
+		t.Errorf("song_artist_idx mismatch")
+	}
+	if !reflect.DeepEqual(want.SongAlbumIdx, got.SongAlbumIdx) {
+		t.Errorf("song_album_idx mismatch")
+	}
+	if !reflect.DeepEqual(want.SongGenreIdx, got.SongGenreIdx) {
+		t.Errorf("song_genre_idx mismatch")
+	}
+	if !reflect.DeepEqual(want.SongComposerIdx, got.SongComposerIdx) {
+		t.Errorf("song_composer_idx mismatch")
+	}
 
-	if !reflect.DeepEqual(want.ArtistGroups,   got.ArtistGroups)   { t.Errorf("artist_groups mismatch:\n want %v\n  got %v", want.ArtistGroups, got.ArtistGroups) }
-	if !reflect.DeepEqual(want.AlbumGroups,    got.AlbumGroups)    { t.Errorf("album_groups mismatch") }
-	if !reflect.DeepEqual(want.GenreGroups,    got.GenreGroups)    { t.Errorf("genre_groups mismatch") }
-	if !reflect.DeepEqual(want.ComposerGroups, got.ComposerGroups) { t.Errorf("composer_groups mismatch") }
+	if !reflect.DeepEqual(want.ArtistGroups, got.ArtistGroups) {
+		t.Errorf("artist_groups mismatch:\n want %v\n  got %v", want.ArtistGroups, got.ArtistGroups)
+	}
+	if !reflect.DeepEqual(want.AlbumGroups, got.AlbumGroups) {
+		t.Errorf("album_groups mismatch")
+	}
+	if !reflect.DeepEqual(want.GenreGroups, got.GenreGroups) {
+		t.Errorf("genre_groups mismatch")
+	}
+	if !reflect.DeepEqual(want.ComposerGroups, got.ComposerGroups) {
+		t.Errorf("composer_groups mismatch")
+	}
 
 	for i := range want.Songs {
-		if want.Songs[i].Title != got.Songs[i].Title { t.Errorf("song[%d] title: want %q got %q", i, want.Songs[i].Title, got.Songs[i].Title) }
-		if want.Songs[i].Path  != got.Songs[i].Path  { t.Errorf("song[%d] path: want %q got %q", i, want.Songs[i].Path,  got.Songs[i].Path) }
+		if want.Songs[i].Title != got.Songs[i].Title {
+			t.Errorf("song[%d] title: want %q got %q", i, want.Songs[i].Title, got.Songs[i].Title)
+		}
+		if want.Songs[i].Path != got.Songs[i].Path {
+			t.Errorf("song[%d] path: want %q got %q", i, want.Songs[i].Path, got.Songs[i].Path)
+		}
 		if !bytes.Equal(want.Songs[i].ArtBytes, got.Songs[i].ArtBytes) {
 			t.Errorf("song[%d] art bytes mismatch", i)
 		}
 	}
 
 	// Spot-check dedup outcomes.
-	if len(got.UniqArtists) != 2   { t.Errorf("expected 2 uniq artists, got %d (%v)", len(got.UniqArtists), got.UniqArtists) }
-	if len(got.UniqComposers) != 1 { t.Errorf("expected 1 uniq composer, got %d (%v)", len(got.UniqComposers), got.UniqComposers) }
+	if len(got.UniqArtists) != 2 {
+		t.Errorf("expected 2 uniq artists, got %d (%v)", len(got.UniqArtists), got.UniqArtists)
+	}
+	if len(got.UniqComposers) != 1 {
+		t.Errorf("expected 1 uniq composer, got %d (%v)", len(got.UniqComposers), got.UniqComposers)
+	}
 	// Aphex group should hold the two Aphex tracks (post-sort by title — Apple, Banana = global indices 0, 1).
 	aphex := -1
 	for i, a := range got.UniqArtists {
-		if a == "Aphex Twin" { aphex = i }
+		if a == "Aphex Twin" {
+			aphex = i
+		}
 	}
 	if aphex < 0 || !reflect.DeepEqual(got.ArtistGroups[aphex], []uint32{0, 1}) {
 		t.Errorf("aphex group: want [0 1] got %v (artists=%v)", got.ArtistGroups[aphex], got.UniqArtists)
@@ -94,7 +120,7 @@ func TestCaseCollision(t *testing.T) {
 	in := []SongInfo{
 		// "Apple" sorts before "Banana", so the first-encountered
 		// spelling of the case-folded artist is "Aphex Twin".
-		{Path: "/a.flac", Title: "Apple",  Artist: "Aphex Twin"},
+		{Path: "/a.flac", Title: "Apple", Artist: "Aphex Twin"},
 		{Path: "/b.flac", Title: "Banana", Artist: "aphex twin"},
 	}
 	m := Build(in)
@@ -135,7 +161,7 @@ func TestEmpty(t *testing.T) {
 // silently break artist thumbnails on real hardware.
 func TestArtistArtRoundtrip(t *testing.T) {
 	in := []SongInfo{
-		{Path: "/a.flac", Title: "Apple",  Artist: "Aphex Twin"},
+		{Path: "/a.flac", Title: "Apple", Artist: "Aphex Twin"},
 		{Path: "/b.flac", Title: "Banana", Artist: "Brian Eno"},
 		{Path: "/c.flac", Title: "Cherry", Artist: "Caribou"},
 	}

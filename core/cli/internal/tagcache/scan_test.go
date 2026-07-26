@@ -94,13 +94,13 @@ func TestPrimaryArtist(t *testing.T) {
 // with the lossless copy winning.
 func TestDedupeSongs(t *testing.T) {
 	in := []SongInfo{
-		{Path: "/m/Aphex Twin/Drukqs/01.mp3",         Title: "Avril 14th", Artist: "Aphex Twin", Album: "Drukqs"},
-		{Path: "/m/FLAC/Aphex Twin/Drukqs/01.flac",   Title: "Avril 14th", Artist: "Aphex Twin", Album: "Drukqs"},
+		{Path: "/m/Aphex Twin/Drukqs/01.mp3", Title: "Avril 14th", Artist: "Aphex Twin", Album: "Drukqs"},
+		{Path: "/m/FLAC/Aphex Twin/Drukqs/01.flac", Title: "Avril 14th", Artist: "Aphex Twin", Album: "Drukqs"},
 		/* Different-album dupes don't collapse. */
-		{Path: "/m/Aphex Twin/Selected/01.flac",      Title: "Avril 14th", Artist: "Aphex Twin", Album: "Selected"},
+		{Path: "/m/Aphex Twin/Selected/01.flac", Title: "Avril 14th", Artist: "Aphex Twin", Album: "Selected"},
 		/* Two untagged files keep both rows (empty key would otherwise lump them). */
-		{Path: "/m/random/a.mp3",                     Title: "a"},
-		{Path: "/m/random/b.mp3",                     Title: "b"},
+		{Path: "/m/random/a.mp3", Title: "a"},
+		{Path: "/m/random/b.mp3", Title: "b"},
 	}
 	out := dedupeSongs(append([]SongInfo(nil), in...))
 	if len(out) != 4 {
