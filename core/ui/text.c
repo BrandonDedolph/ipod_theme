@@ -2,32 +2,29 @@
 /*
  * core/ui/text.c — freestanding antialiased text rendering.
  *
- * This is the freestanding sibling of core/apps/ui/atlas.c: the same
- * gamma-correct alpha blend and glyph layout, but libc-free and drawing
+ * A gamma-correct alpha blend and glyph layout that is libc-free and draws
  * into a caller-supplied RGB565 framebuffer with explicit bounds (so it
  * needs neither lcd_framebuffer() nor the compile-time LCD_WIDTH/HEIGHT).
  * It links into core.elf on the device and into the host text_test.
  *
  * The atlas data (glyph metrics + concatenated alpha-coverage rows) lives
- * in the generated core/apps/ui/atlas/ headers; including them here
- * makes the const atlas_t handles resolve at link time — no init step, no
- * TTF parsing, no allocation. Everything is .rodata.
+ * in the generated core/ui/atlas/ headers; including them here makes the
+ * const atlas_t handles resolve at link time — no init step, no TTF
+ * parsing, no allocation. Everything is .rodata.
  */
 
 #include "text.h"
 
 /* atlas_glyph_t / atlas_t and the generated atlas handles. The generated
- * headers each pull in ../atlas.h (which only needs stdint + hal.h — both
- * freestanding-safe), then define their static coverage data + a
- * const atlas_t. This TU is the sole definition site for those atlas_t
- * symbols in both the hw link (atlas.c is sim-only) and the host text_test
- * link (which links text.c but not atlas.c), so there is no clash. */
+ * headers each pull in ../atlas.h (which needs only stdint — freestanding-
+ * safe), then define their static coverage data + a const atlas_t. This TU
+ * is the sole definition site for those atlas_t symbols, so there is no
+ * clash between the hw link and the host text_test link. */
 #include "atlas.h"
 #include "atlas/glyphmap.h"        /* ATLAS_CPMAP[]: codepoint -> glyph index */
 #include "atlas/nunito_regular_9.h"
 #include "atlas/nunito_regular_11.h"
 #include "atlas/nunito_regular_13.h"
-#include "atlas/nunito_bold_9.h"
 #include "atlas/nunito_bold_11.h"
 #include "atlas/nunito_bold_13.h"
 #include "atlas/nunito_bold_17.h"
@@ -41,7 +38,6 @@ struct text_font {
 static const struct text_font FONT_REGULAR_9  = { &NUNITO_REGULAR_9  };
 static const struct text_font FONT_REGULAR_11 = { &NUNITO_REGULAR_11 };
 static const struct text_font FONT_REGULAR_13 = { &NUNITO_REGULAR_13 };
-static const struct text_font FONT_BOLD_9     = { &NUNITO_BOLD_9     };
 static const struct text_font FONT_BOLD_11    = { &NUNITO_BOLD_11    };
 static const struct text_font FONT_BOLD_13    = { &NUNITO_BOLD_13    };
 static const struct text_font FONT_BOLD_17    = { &NUNITO_BOLD_17    };
@@ -49,7 +45,6 @@ static const struct text_font FONT_BOLD_17    = { &NUNITO_BOLD_17    };
 const text_font_t *text_font_regular_9(void)  { return &FONT_REGULAR_9;  }
 const text_font_t *text_font_regular_11(void) { return &FONT_REGULAR_11; }
 const text_font_t *text_font_regular_13(void) { return &FONT_REGULAR_13; }
-const text_font_t *text_font_bold_9(void)     { return &FONT_BOLD_9;     }
 const text_font_t *text_font_bold_11(void)    { return &FONT_BOLD_11;    }
 const text_font_t *text_font_bold_13(void)    { return &FONT_BOLD_13;    }
 const text_font_t *text_font_bold_17(void)    { return &FONT_BOLD_17;    }
@@ -119,15 +114,19 @@ static const uint8_t linear_to_srgb6[256] = {
 /* Decode one UTF-8 sequence at *p, advance *p past it, and return the codepoint
  * (or -1 at the terminating NUL). Malformed bytes yield U+FFFD and advance one
  * byte so a bad string can't stall. UI strings are UTF-8; ASCII is the 1-byte
- * fast path (the common case). */
+ * fast path (the common case).
+ *
+ * A truncated sequence advances ONE byte and re-syncs on the next call: the
+ * continuation check reads only bytes at or before the NUL (the NUL fails the
+ * check), so a chopped tag can never walk off the end of its buffer. */
 static int utf8_next(const unsigned char **p) {
     unsigned char c = **p;
     if (c == 0) return -1;
     if (c < 0x80) { (*p)++; return c; }
-    int n, cp;
-    if      ((c & 0xE0) == 0xC0) { n = 1; cp = c & 0x1F; }
-    else if ((c & 0xF0) == 0xE0) { n = 2; cp = c & 0x0F; }
-    else if ((c & 0xF8) == 0xF0) { n = 3; cp = c & 0x07; }
+    int n, cp, min;
+    if      ((c & 0xE0) == 0xC0) { n = 1; cp = c & 0x1F; min = 0x80;    }
+    else if ((c & 0xF0) == 0xE0) { n = 2; cp = c & 0x0F; min = 0x800;   }
+    else if ((c & 0xF8) == 0xF0) { n = 3; cp = c & 0x07; min = 0x10000; }
     else { (*p)++; return 0xFFFD; }               /* stray continuation/lead */
     const unsigned char *q = *p + 1;
     for (int i = 0; i < n; i++) {
@@ -135,6 +134,13 @@ static int utf8_next(const unsigned char **p) {
         cp = (cp << 6) | (q[i] & 0x3F);
     }
     *p += n + 1;
+    /* Reject non-minimal ("overlong") forms: C0 80 must NOT decode to U+0000
+     * and E0 80 AF must NOT decode to '/', or a crafted tag could smuggle a
+     * NUL/path separator past a byte-level check. Same for the UTF-16
+     * surrogate halves (never valid in UTF-8) and anything past U+10FFFF. */
+    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+        return 0xFFFD;
+    }
     return cp;
 }
 
@@ -161,6 +167,43 @@ static int glyph_index(int cp) {
     return -1;
 }
 
+/* ---------- .notdef ------------------------------------------------- *
+ * The atlas covers ASCII + Latin-1 + smart punctuation and nothing else, so a
+ * CJK / Cyrillic / Greek / emoji track name used to advance by a space and draw
+ * nothing at all: the row rendered as a run of invisible blanks, with no hint
+ * that there was ever a title there. Draw the typographic fallback instead — a
+ * hollow box at cap height, one per unrenderable codepoint.
+ *
+ * Control codes are NOT boxed: a stray \n or \t smuggled in by an ID3 tag is
+ * meant to be nothing, and a column of boxes there would be worse than a gap.
+ * They keep the old space-width blank. */
+static int is_blank_cp(int cp) {
+    return cp < 0x20 || (cp >= 0x7F && cp <= 0x9F);
+}
+
+/* Box geometry, derived from the face so every size gets a proportionate one:
+ * cap height is ~3/4 of the ascent, and the classic .notdef is ~2:3. */
+static int notdef_h(const atlas_t *a) {
+    int h = (a->ascent * 3) / 4;
+    return h < 4 ? 4 : h;
+}
+
+static int notdef_w(const atlas_t *a) {
+    int w = (notdef_h(a) * 2) / 3;
+    return w < 3 ? 3 : w;
+}
+
+/* Pen advance for the box, incl. a 1px side bearing either side. text_width and
+ * text_draw_c MUST agree on this or the returned pen drifts from the measure. */
+static int notdef_advance(const atlas_t *a) {
+    return notdef_w(a) + 2;
+}
+
+/* Advance for a codepoint with no atlas glyph (blank or box). */
+static int fallback_advance(const atlas_t *a, int cp) {
+    return is_blank_cp(cp) ? a->glyphs[0].advance : notdef_advance(a);
+}
+
 /* ---------- Measurement / metrics ---------------------------------- */
 
 int text_width(const char *s, const text_font_t *font) {
@@ -171,7 +214,7 @@ int text_width(const char *s, const text_font_t *font) {
     while ((cp = utf8_next(&p)) >= 0) {
         int gi = glyph_index(cp);
         if (gi < 0) {
-            w += a->glyphs[0].advance;   /* space width */
+            w += fallback_advance(a, cp);
             continue;
         }
         w += a->glyphs[gi].advance;
@@ -196,12 +239,42 @@ int text_ascent(const text_font_t *font) {
 
 /* ---------- Rendering ---------------------------------------------- */
 
+/* Paint the .notdef box for one unrenderable codepoint: a 1px hollow rectangle
+ * sitting on the baseline, drawn in solid ink (no coverage data, so no atlas
+ * read at all — this path cannot go out of bounds in the glyph data). Every
+ * write is clamped to the clip window, which the caller has already clamped to
+ * the framebuffer. */
+static void draw_notdef(uint16_t *fb, int fb_w, int x, int y, const atlas_t *a,
+                        uint16_t ink, int cx0, int cx1, int cy0, int cy1) {
+    int bw = notdef_w(a), bh = notdef_h(a);
+    int bx = x + 1, by = y - bh;              /* 1px left bearing, on baseline */
+
+    int i0 = cx0 - bx; if (i0 < 0) i0 = 0;
+    int i1 = cx1 - bx; if (i1 > bw) i1 = bw;
+    int j0 = cy0 - by; if (j0 < 0) j0 = 0;
+    int j1 = cy1 - by; if (j1 > bh) j1 = bh;
+
+    for (int j = j0; j < j1; j++) {
+        uint16_t *px = fb + (long)(by + j) * fb_w + (bx + i0);
+        int edge_row = (j == 0 || j == bh - 1);
+        for (int i = i0; i < i1; i++, px++) {
+            if (edge_row || i == 0 || i == bw - 1) {
+                *px = ink;
+            }
+        }
+    }
+}
+
 static int text_draw_c(uint16_t *fb, int fb_w, int fb_h, int x, int y,
                        const char *s, const text_font_t *font, uint16_t ink,
                        int cx0, int cx1, int cy0, int cy1) {
     if (!fb || !font || !s || fb_w <= 0 || fb_h <= 0) {
         return x;
     }
+    /* Clamp the clip window to the framebuffer ONCE. Everything below derives
+     * its loop bounds from these, so no per-pixel bounds test is needed. */
+    if (cx0 < 0) cx0 = 0;
+    if (cx1 > fb_w) cx1 = fb_w;
     if (cy0 < 0) cy0 = 0;
     if (cy1 > fb_h) cy1 = fb_h;
     const atlas_t *a = font->a;
@@ -219,28 +292,62 @@ static int text_draw_c(uint16_t *fb, int fb_w, int fb_h, int x, int y,
     while ((cp = utf8_next(&p)) >= 0) {
         int gi = glyph_index(cp);
         if (gi < 0) {
-            x += a->glyphs[0].advance;   /* treat as space-width */
+            if (!is_blank_cp(cp)) {
+                draw_notdef(fb, fb_w, x, y, a, ink, cx0, cx1, cy0, cy1);
+            }
+            x += fallback_advance(a, cp);
             continue;
         }
         const atlas_glyph_t *gly = &a->glyphs[gi];
-        const uint8_t *src = a->data + gly->data_offset;
 
         /* offset_y is "px below the ascender line" (PIL bbox convention).
          * Convert to framebuffer y: from the baseline, walk up by ascent
          * to the ascender, then down by offset_y to this glyph's top. */
+        int gw = gly->w, gh = gly->h;
         int gx = x + gly->offset_x;
         int gy = y - a->ascent + gly->offset_y;
 
-        for (int j = 0; j < gly->h; j++) {
-            int py = gy + j;
-            if (py < 0 || py >= fb_h || py < cy0 || py >= cy1) continue;
-            for (int i = 0; i < gly->w; i++) {
-                int px = gx + i;
-                if (px < cx0 || px >= cx1) continue;
-                uint8_t alpha = src[j * gly->w + i];
+        /* Whole-glyph reject against the clip window. The marquee tick runs
+         * 30x/s over a title several times wider than its window, so most
+         * glyphs of most ticks are entirely off one side; rasterizing them
+         * was ~half the work per tick. Left of the window: advance and move
+         * on. At or right of it: nothing further can land, so stop drawing —
+         * but keep summing advances, since callers chain on the returned pen. */
+        if (gx + gw <= cx0) {
+            x += gly->advance;
+            continue;
+        }
+        if (gx >= cx1) {
+            x += gly->advance;
+            while ((cp = utf8_next(&p)) >= 0) {
+                int gj = glyph_index(cp);
+                x += (gj < 0) ? fallback_advance(a, cp) : a->glyphs[gj].advance;
+            }
+            break;
+        }
+
+        /* Clamp the glyph's row/column ranges to the clip window once, so the
+         * inner loop is a straight run with no per-pixel branch, and hoist both
+         * row pointers out of it (-Os will not strength-reduce these). */
+        int i0 = cx0 - gx; if (i0 < 0) i0 = 0;
+        int i1 = cx1 - gx; if (i1 > gw) i1 = gw;
+        int j0 = cy0 - gy; if (j0 < 0) j0 = 0;
+        int j1 = cy1 - gy; if (j1 > gh) j1 = gh;
+        if (i0 >= i1 || j0 >= j1) {
+            x += gly->advance;
+            continue;
+        }
+
+        const uint8_t *srow = a->data + gly->data_offset + (long)j0 * gw + i0;
+        uint16_t *drow = fb + (long)(gy + j0) * fb_w + (gx + i0);
+        int run = i1 - i0;
+
+        for (int j = j0; j < j1; j++, srow += gw, drow += fb_w) {
+            for (int i = 0; i < run; i++) {
+                uint8_t alpha = srow[i];
                 if (alpha == 0) continue;
 
-                uint16_t *dst = &fb[py * fb_w + px];
+                uint16_t *dst = &drow[i];
 
                 if (alpha == 255) {
                     *dst = ink;
