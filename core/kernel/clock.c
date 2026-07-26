@@ -56,6 +56,31 @@ static uint32_t g_freq = CPUFREQ_DEFAULT;
 static int g_boost;
 
 /*
+ * Set while the audio DMA is streaming PCM out of SDRAM (hal/hw/audio.c calls
+ * clock_set_audio_dma_active on start/stop).
+ *
+ * set_cpu_frequency reprograms DEV_TIMING1 — the SDRAM/peripheral bus timing —
+ * and routes CLOCK_SOURCE through the crystal and back while the PLL is
+ * relocked. A DMA master reading SDRAM across that window is reading through
+ * timing that is being rewritten underneath it. Today that never happens, but
+ * only INCIDENTALLY: the one caller happens to check !player_active() first,
+ * and it does so for power reasons, not correctness ones. Anyone adding a
+ * boost anywhere else — the ATA driver now brackets transfers in one — would
+ * silently inherit the hazard.
+ *
+ * So the guard belongs here, at the register sequence that is actually unsafe,
+ * not in the callers. Refusing is the right answer rather than quiescing: the
+ * DMA cannot be paused without a gap in the audio, and a frequency change is
+ * always optional.
+ */
+static volatile int g_dma_active;
+
+void clock_set_audio_dma_active(int active)
+{
+    g_dma_active = active ? 1 : 0;
+}
+
+/*
  * Run the PP5022 frequency switch to the given PLL_CONTROL target and
  * record the resulting core frequency. `operating_timing` is the
  * DEV_TIMING1 value for the target point (SLOW for 30 MHz, FAST for
@@ -68,6 +93,13 @@ static void set_cpu_frequency(uint32_t pll_value, uint32_t operating_timing,
                               uint32_t new_freq_hz)
 {
     uint32_t spin;
+
+    /* 0. Refuse outright while audio DMA is streaming from SDRAM — see
+     *    g_dma_active. Nothing is written, and g_freq keeps reporting the
+     *    frequency we are actually running at. */
+    if (g_dma_active) {
+        return;
+    }
 
     /* 1. Power up the PLL (preserve the other DEV_INIT2 bits). */
     mmio_write32(DEV_INIT2_ADDR,
@@ -138,7 +170,8 @@ uint32_t cpu_frequency(void)
  */
 void clock_test_reset(void)
 {
-    g_freq  = CPUFREQ_DEFAULT;
-    g_boost = 0;
+    g_freq       = CPUFREQ_DEFAULT;
+    g_boost      = 0;
+    g_dma_active = 0;
 }
 #endif

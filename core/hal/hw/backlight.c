@@ -92,11 +92,49 @@
  * protocol-critical; the absolute widths need on-hardware confirmation
  * (see file header). Kept as bounded loops on purpose: no timer driver
  * dependency, no libc.
+ *
+ * THE COUNTS ARE CALIBRATED AT CPUFREQ_NORMAL (30 MHz) and scaled at use —
+ * see bl_scale(). They are pure CPU-cycle loops, so the wall-clock width of
+ * every pulse moves with the core clock, and the core now scales 30 <-> 80 MHz
+ * under kernel/clock.c. That is not a cosmetic drift: DIRECTION is encoded in
+ * the low-pulse WIDTH (short = brighter, long = dimmer), so a 2.67x stretch
+ * can push a "short" past the driver IC's short/long threshold, where it reads
+ * as a dim step. The tracked level then diverges from the chip's real level
+ * and brightness walks the wrong way for the rest of the session. The wake
+ * path makes this reachable: it calls backlight_set() BEFORE re-boosting, so
+ * brighten pulses go out at the slow clock.
  */
 #define BL_LOOPS_SHORT  200u            /* ~10 us  low pulse -> step up   */
 #define BL_LOOPS_LONG   (BL_LOOPS_SHORT * 20u) /* ~200 us low -> step down */
 #define BL_LOOPS_GAP    200u            /* ~10 us  high gap between pulses */
 #define BL_LOOPS_SETTLE 20000u          /* ~ms-scale power-up settle      */
+
+/* Clock the loop counts were calibrated against (backlight_init runs here,
+ * right after clock_init moves the core off the crystal). */
+#define BL_CALIB_HZ     30000000u
+
+/*
+ * Current core frequency, for the scaling above. Weak so backlight.c still
+ * links standalone in the host golden-trace test, which has no kernel clock
+ * driver; absent, we assume the calibration clock and behave exactly as
+ * before. Deliberately NOT a USEC_TIMER-based udelay: that would insert MMIO
+ * reads into a pulse sequence the golden trace asserts write-for-write.
+ */
+__attribute__((weak)) uint32_t cpu_frequency(void);
+
+static uint32_t bl_scale(uint32_t loops)
+{
+    if (!cpu_frequency) {
+        return loops;
+    }
+    uint32_t hz = cpu_frequency();
+    if (hz == 0u || hz == BL_CALIB_HZ) {
+        return loops;
+    }
+    /* loops * hz / BL_CALIB_HZ, kept in 32 bits by dividing the clock into
+     * MHz first (all our operating points are whole MHz). */
+    return loops * (hz / 1000000u) / (BL_CALIB_HZ / 1000000u);
+}
 
 /* Tracked dimmer level (1..BACKLIGHT_MAX). Undefined until backlight_init
  * seeds it from the BL_DIM_RESET power-up reference. */
@@ -133,12 +171,15 @@ static void bl_gpio_clear(uint32_t val_addr, uint32_t mask)
  */
 static void bl_pulse(uint32_t low_loops)
 {
+    uint32_t low = bl_scale(low_loops);
+    uint32_t gap = bl_scale(BL_LOOPS_GAP);
+
     BL_IRQ_ENTER();
     bl_gpio_clear(GPIOD_OUTPUT_VAL_ADDR, BL_GPIOD_STEP);
-    bl_delay(low_loops);
+    bl_delay(low);
     bl_gpio_set(GPIOD_OUTPUT_VAL_ADDR, BL_GPIOD_STEP);
     BL_IRQ_EXIT();
-    bl_delay(BL_LOOPS_GAP);
+    bl_delay(gap);
 }
 
 /* Walk the tracked level to `target` (already clamped to 1..MAX) with the
@@ -153,6 +194,59 @@ static void bl_step_to(int target)
         bl_pulse(BL_LOOPS_LONG);    /* long low: one step dimmer */
         bl_level--;
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Charge-pump power management for the screen-off state.
+ *
+ * backlight_set(0) only drops the GPIOL LED-enable line and deliberately KEEPS
+ * GPIOB bit 3 (circuit power) asserted, so a later non-zero set relights
+ * instantly at the tracked level without re-walking the dimmer. The cost is
+ * that the boost converter idles — powered, producing nothing — for the entire
+ * screen-off period, which on this device is most of its life while playing.
+ *
+ * So: after a grace period in the off state, drop circuit power too. The next
+ * power-up re-seeds from the one absolute reference the chip gives us
+ * (BL_DIM_RESET, the level it comes up at) and walks from there, which is
+ * exactly what backlight_init already does.
+ *
+ * The grace period is counted in service ticks rather than wall clock on
+ * purpose: backlight_set(0) must stay a SINGLE bus write (a golden trace
+ * asserts precisely that), so it cannot read the microsecond counter. It only
+ * sets a flag; backlight_service(), called from the 100 Hz tick, does the
+ * counting and emits the one power-down write.
+ * ------------------------------------------------------------------------- */
+#define BL_OFF_GRACE_TICKS  300u    /* ~3 s at HZ = 100 */
+
+static int      bl_powered;         /* GPIOB circuit power currently asserted */
+static int      bl_led_off;         /* backlight_set(0) was the last request  */
+static uint32_t bl_off_ticks;       /* ticks spent in the off state           */
+
+/* Assert circuit power and re-seed the tracked level from the chip's power-up
+ * reference. Mirrors the power-up half of backlight_init. */
+static void bl_power_up(void)
+{
+    bl_gpio_set(GPIOB_OUTPUT_VAL_ADDR, BL_GPIOB_POWER);
+    bl_gpio_set(GPIOD_OUTPUT_VAL_ADDR, BL_GPIOD_STEP);
+    bl_delay(bl_scale(BL_LOOPS_SETTLE));
+    bl_level  = BL_DIM_RESET;       /* the one absolute reference we get */
+    bl_powered = 1;
+}
+
+void backlight_service(void)
+{
+    if (!bl_led_off || !bl_powered) {
+        bl_off_ticks = 0;
+        return;
+    }
+    if (++bl_off_ticks < BL_OFF_GRACE_TICKS) {
+        return;
+    }
+    /* Grace expired: shut the boost converter down. One atomic masked write;
+     * safe from the tick ISR. */
+    bl_gpio_clear(GPIOB_OUTPUT_VAL_ADDR, BL_GPIOB_POWER);
+    bl_powered   = 0;
+    bl_off_ticks = 0;
 }
 
 void backlight_init(void)
@@ -172,7 +266,9 @@ void backlight_init(void)
     bl_delay(BL_LOOPS_SETTLE);
 
     /* The chip is now at its power-up reference level; walk it to full. */
-    bl_level = BL_DIM_RESET;
+    bl_level   = BL_DIM_RESET;
+    bl_powered = 1;
+    bl_led_off = 0;
     bl_step_to(BACKLIGHT_MAX);
 
     /* Finally enable the LED output. */
@@ -184,14 +280,24 @@ void backlight_init(void)
 void backlight_set(int level)
 {
     if (level <= 0) {
-        /* Off: drop the LED enable. The circuit stays powered and the
-         * tracked level is preserved, so a later non-zero set relights
-         * instantly without re-walking the dimmer. */
+        /* Off: drop the LED enable — ONE bus write, nothing else. The circuit
+         * stays powered for now and the tracked level is preserved, so a set
+         * within the grace period relights instantly without re-walking the
+         * dimmer; backlight_service() drops the charge pump if the off state
+         * outlasts BL_OFF_GRACE_TICKS. */
+        bl_led_off = 1;
         bl_gpio_clear(GPIOL_OUTPUT_VAL_ADDR, BL_GPIOL_LED);
         return;
     }
     if (level > BACKLIGHT_MAX) {
         level = BACKLIGHT_MAX;
+    }
+    bl_led_off = 0;
+
+    /* If the grace period expired and the boost converter was shut down,
+     * bring it back and re-seed the tracked level before stepping. */
+    if (!bl_powered) {
+        bl_power_up();
     }
 
     /* Ensure the LED is on (it may have been turned off), then step the

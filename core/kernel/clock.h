@@ -39,4 +39,15 @@ void cpu_unboost(void);
 /* Current core frequency in Hz (one of the CPUFREQ_* values). */
 uint32_t cpu_frequency(void);
 
+/*
+ * Tell the clock driver whether the audio DMA is currently streaming PCM out
+ * of SDRAM. While it is, cpu_boost/cpu_unboost/clock_init become no-ops: the
+ * frequency switch reprograms DEV_TIMING1 (SDRAM/peripheral bus timing) and
+ * detours CLOCK_SOURCE through the crystal while the PLL relocks, which is not
+ * something a DMA master reading SDRAM can be exposed to. Called from
+ * hal/hw/audio.c on start/stop; the refusal is silent and cpu_frequency()
+ * keeps reporting the frequency actually in effect.
+ */
+void clock_set_audio_dma_active(int active);
+
 #endif /* CORE_KERNEL_CLOCK_H */

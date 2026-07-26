@@ -25,6 +25,7 @@
 #include "irqlock.h"      /* hw_irq_save/restore: set_source quiescence          */
 #include "audio.h"
 #include "../../kernel/cache.h"   /* cache_commit(): flush before DMA reads */
+#include "../../kernel/clock.h"   /* lock out frequency switches while streaming */
 
 /*
  * Ping-pong PCM buffers: 8192 frames each = 32 KB = ~186 ms at 44.1 kHz. The
@@ -277,6 +278,7 @@ void hal_audio_start(void)
     }
     i2s_tx_enable();
     wm8758_mute(false);                        /* undo the mute from stop */
+    clock_set_audio_dma_active(1);             /* freeze the CPU/SDRAM clocks */
     mmio_write32(CPU_INT_EN_ADDR, DMA_MASK);   /* enable IRQ 26 */
 
     if (g_primed) {
@@ -384,6 +386,7 @@ void hal_audio_stop(void)
     g_running = 0;
     mmio_write32(CPU_INT_DIS_ADDR, DMA_MASK);   /* mask IRQ 26 */
     dma_playback_stop();
+    clock_set_audio_dma_active(0);              /* clocks may move again */
     /* g_primed deliberately survives: the buffers still hold unplayed PCM and
      * hal_audio_start() resumes into them (see there). */
 }
