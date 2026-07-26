@@ -73,6 +73,14 @@ func TestFirmwarePackRoundTrip(t *testing.T) {
 		t.Error("round-tripped image differs from input")
 	}
 
+	// The atomic write goes through a 0600 temp file; the artifact
+	// itself must still land readable, as the direct-write path did.
+	if fi, err := os.Stat(out); err != nil {
+		t.Fatalf("stat: %v", err)
+	} else if fi.Mode().Perm() != 0o644 {
+		t.Errorf("packed file mode = %o, want 644", fi.Mode().Perm())
+	}
+
 	back := filepath.Join(dir, "back.bin")
 	if _, _, err := runCore(t, "firmware", "unpack", out, "--out", back); err != nil {
 		t.Fatalf("unpack: %v", err)

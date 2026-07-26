@@ -108,6 +108,12 @@ func writeFileAtomic(path string, force bool, write func(io.Writer) error, verif
 	if err := tmp.Close(); err != nil {
 		return fail(fmt.Errorf("close %s: %w", tmpName, err))
 	}
+	// os.CreateTemp makes the file 0600; the direct-write path this
+	// replaced produced 0644, and the output is an artifact meant to be
+	// read and copied around, not a secret.
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return fail(fmt.Errorf("chmod %s: %w", tmpName, err))
+	}
 	if verify != nil {
 		data, err := os.ReadFile(tmpName)
 		if err != nil {
