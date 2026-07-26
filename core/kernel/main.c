@@ -3324,6 +3324,13 @@ _Noreturn static void run_ui(fat32_t *fs)
     scr_push(SCR_MENU);
 
     int      dirty = 1;
+    /* Backlight relight deferred until after the first post-wake present has
+     * retired. Lighting the LED over a panel that is still running its BCM init
+     * is precisely what the user sees as a white screen (02-lcd.md:490), so when
+     * the panel was slept we raise this instead of calling backlight_set() at
+     * the input site. Inert while PANEL_SLEEP_AT_IDLE is 0 (panel_slept never
+     * sets), but it is what makes that flag safe to flip. */
+    int      bl_relight = 0;
     uint32_t np_last = 0xFFFFFFFFu;
     int      np_first = 1;
     int      np_vol_prev = 0;            /* volume overlay was up last NP paint  */
@@ -3455,7 +3462,8 @@ _Noreturn static void run_ui(fat32_t *fs)
             ui_window_arm(&g_lock_flash);
             last_input = mmio_read32(USEC_TIMER_ADDR);   /* wake the backlight    */
             if (bl_state != BL_FULL) {
-                backlight_set(g_settings.backlight_bright);
+                if (panel_slept) bl_relight = 1;         /* after the present     */
+                else             backlight_set(g_settings.backlight_bright);
                 bl_state = BL_FULL;
             }
             dirty = 1;
@@ -3469,7 +3477,8 @@ _Noreturn static void run_ui(fat32_t *fs)
             last_input = mmio_read32(USEC_TIMER_ADDR);
             if (bl_state != BL_FULL) {
                 int was_off = (bl_state == BL_OFF);
-                backlight_set(g_settings.backlight_bright);
+                if (panel_slept) bl_relight = 1;         /* after the present     */
+                else             backlight_set(g_settings.backlight_bright);
                 bl_state = BL_FULL;
                 dirty = 1;                    /* repaint anything drawn while off */
                 if (was_off) {                /* swallow the wake press */
@@ -4006,6 +4015,14 @@ _Noreturn static void run_ui(fat32_t *fs)
                 dirty = 0;
                 last_present = now;
             }
+        }
+
+        /* Deferred post-wake relight: the panel has now had a real frame pushed
+         * to it (and the hardened commit path blocked for the BCM's panel init),
+         * so it is safe to put light behind it. See bl_relight's declaration. */
+        if (bl_relight && !dirty) {
+            backlight_set(g_settings.backlight_bright);
+            bl_relight = 0;
         }
 
         /* Animate the now-playing 3-bar indicator in the album detail: redraw
