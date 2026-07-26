@@ -110,12 +110,34 @@ static int ui_window_up(ui_window_t *w, uint32_t span, uint32_t now)
 #define FONT_SUB      text_font_regular_11()
 #define FONT_SMALL    text_font_regular_9()
 
+/* The Nunito renderer writes straight through console_fb(), which console.c's
+ * damage tracker can't see — so every text draw reports its own ink box, or a
+ * damage-only present would drop the glyphs. `y` is the baseline. */
+static void ui_text_damage(int x, int y, int w, const text_font_t *font)
+{
+    int asc = text_ascent(font), desc = text_descent(font);
+    console_damage_add(x, y - asc, w, asc + desc);
+}
+
 /* Draw a NUL-terminated string; thin wrapper over text_draw with the panel
  * dimensions baked in. `y` is the text baseline. Returns the advance. */
 static int ui_text(int x, int y, const char *s, const text_font_t *font,
                    uint16_t ink)
 {
-    return text_draw(console_fb(), LCD_WIDTH, LCD_HEIGHT, x, y, s, font, ink);
+    int end = text_draw(console_fb(), LCD_WIDTH, LCD_HEIGHT, x, y, s, font, ink);
+    ui_text_damage(x, y, end - x, font);
+    return end;
+}
+
+/* text_draw_clip with the panel dimensions baked in + damage reporting. */
+static int ui_text_clip(int x, int y, const char *s, const text_font_t *font,
+                        uint16_t ink, int cx0, int cx1)
+{
+    int end = text_draw_clip(console_fb(), LCD_WIDTH, LCD_HEIGHT, x, y, s, font,
+                             ink, cx0, cx1);
+    int x0 = (x > cx0) ? x : cx0, x1 = (end < cx1) ? end : cx1;
+    ui_text_damage(x0, y, x1 - x0, font);
+    return end;
 }
 
 /* Centre a string horizontally at baseline `y`. */
@@ -343,8 +365,7 @@ static void mq_text(int x, int y, int w, const char *text,
          * band clear — the caller already painted the row/selection background,
          * and a clear at y-ascent would bleed ABOVE the selection bar (ascent 14 >
          * the sub-row title lift of 11) and paint a black bar over the row above. */
-        text_draw_clip(console_fb(), LCD_WIDTH, LCD_HEIGHT, x, y, text, font, ink,
-                       x, x + w);
+        ui_text_clip(x, y, text, font, ink, x, x + w);
         return;
     }
     draw_marquee(x, y, w, text, tw, font, ink, bg,
@@ -368,6 +389,13 @@ static int            g_browse_n;
  * g_cur_dir is the cluster of the album whose tracks are currently listed. */
 static uint32_t g_cur_dir;
 static int      g_dir_depth;
+
+/* Browser view state (was local to the old browse loop). The album LIST (depth
+ * 0) and a single album's TRACKLIST (depth 1) keep SEPARATE selections, so
+ * backing out of an album returns the cursor to that album in the list rather
+ * than jumping to the top. */
+static int g_br_sel, g_br_accum;      /* album list (depth 0)  */
+static int g_det_sel, g_det_accum;    /* tracklist   (depth 1) */
 
 /* Index-derived album list — the source of truth is CORELIB.IDX, so an album
  * appears here only if the index references it. Stale/orphan or differently
@@ -407,6 +435,11 @@ static char g_artist_filter[NAME_MAX + 1];
 static int         g_volume = 70;
 static ui_window_t g_vol_show;
 #define VOL_SHOW_US 1500000u
+
+/* The live Settings state (ui/settings.h model). Declared up here because the
+ * library/playback helpers below read it (shuffle, clicker); the navigation and
+ * rendering that own it live in the Settings section further down. */
+static settings_t g_settings;
 
 /* Case-insensitive ASCII match of a dirent name against a literal. */
 static int name_eq_ci(const char *a, const char *b)
@@ -615,6 +648,13 @@ static int browse_collect(void *ud, const fat32_dirent_t *e)
 
     if (e->is_dir) {
         if (is_junk_dir(e->name)) return 0;       /* skip system/Apple folders */
+        /* The browser is exactly two levels (albums, then one album's tracks —
+         * import flattens multi-disc), so a folder nested INSIDE an album
+         * ("Scans", "Artwork") is never navigable. Listing it anyway put a dead
+         * entry in g_browse: the wheel ranged over g_browse_n (dirs included)
+         * while the tracklist view skipped dirs, so one wheel position selected
+         * nothing visible and SELECT there played a different track. */
+        if (g_dir_depth != 0) return 0;
         /* Artists drill-down: at the album-list level, keep only this artist's
          * folders (name "Artist - Album"). */
         if (g_dir_depth == 0 && g_artist_filter[0]) {
@@ -750,10 +790,12 @@ static void status_strip_render(void)
      * cluster, which is painted over it. */
     const char *left = player_active() ? track_display(player_track_name())
                                        : "CORE";
-    ui_text(12, STATUS_Y0 + 11, left, FONT_SMALL, LINEN_MUTED2);
-
-    /* Clear a right-hand region so a long track name can't collide with it. */
-    console_fill_rect(LCD_WIDTH - 70, STATUS_Y0, 70, STATUS_H, LINEN_SURFACE);
+    /* CLIP the name before the right-hand cluster rather than drawing it full
+     * width and then painting a 70x15 rectangle back over its tail — same look,
+     * without rasterising glyphs that are immediately overwritten (and without
+     * dirtying that band for a partial present). */
+    ui_text_clip(12, STATUS_Y0 + 11, left, FONT_SMALL, LINEN_MUTED2,
+                 12, LCD_WIDTH - 70);
 
     int bx = LCD_WIDTH - 12 - 24;             /* battery block (22 + 2 nub)        */
     draw_battery(bx, STATUS_Y0 + 1, g_bat_pct);
@@ -871,8 +913,7 @@ static void list_row_at(int y0, int r, const char *text, const char *sub,
     if (selected) {
         mq_text(tx, base, avail, text, tf, fg, LINEN_SEL_BG, mqy0, mqy1);
     } else {
-        text_draw_clip(console_fb(), LCD_WIDTH, LCD_HEIGHT, tx, base, text, tf, fg,
-                       tx, tx + avail);
+        ui_text_clip(tx, base, text, tf, fg, tx, tx + avail);
     }
     if (sub) {
         ui_text(tx, sub_y, sub, FONT_SMALL, subc);
@@ -998,6 +1039,9 @@ static const char *g_track_title[BROWSE_MAX];
 static int16_t  g_det_view[DET_VIEW_MAX];
 static int      g_det_view_n;
 static int      g_detail_multidisc;
+/* Total runtime of the folder's tracks, summed ONCE in detail_load_meta (the
+ * meta line used to re-sum every track on every paint). 0 = durations unknown. */
+static uint32_t g_detail_total_s;
 
 /* Read the current folder's folder.art (clus/size captured by browse_load) and
  * downscale it to the 56x56 hero. Leaves g_detail_art_ok=0 if absent/malformed.
@@ -1052,6 +1096,82 @@ static void nowplaying_bars(int x, int y, uint16_t c, uint32_t t_us)
     }
 }
 
+/* One tracklist row of the album detail, at list-row `r` showing view entry
+ * `vi`. Split out of detail_render so a selection move can repaint just the two
+ * rows that changed instead of the whole panel (see list_repaint_partial). */
+static void detail_row_draw(int r, int vi)
+{
+    int ry = DET_LIST_Y0 + r * ROW_H;
+    int16_t v = g_det_view[vi];
+    /* Single-disc albums have no "DISC N" header rows, so the per-disc number
+     * gutter is wasted width — pull the numbers and titles left to reclaim it. */
+    int num_rx  = g_detail_multidisc ? 30 : 24;   /* track-number right-align x */
+    int title_x = g_detail_multidisc ? 38 : 30;   /* title left x               */
+    if (v < 0) {                          /* a "Disc N" section header */
+        char h[12];
+        int hi = 0;
+        for (const char *p = "DISC "; *p; p++) h[hi++] = *p;
+        u32_to_dec(h + hi, (unsigned)(-(int)v - 1));
+        ui_text(14, ry + 15, h, FONT_SMALL, LINEN_MUTED_D);
+        return;
+    }
+    int idx = v;
+    const browse_entry_t *e = &g_browse[idx];
+    int is_sel = (idx == g_det_sel);
+    if (is_sel) {
+        fill_round_rect(6, ry + 1, LCD_WIDTH - 16, ROW_H - 2, 4, LINEN_SEL_BG);
+    }
+    uint16_t fg = is_sel ? LINEN_SEL_FG : LINEN_INK;
+    uint16_t nc = is_sel ? LINEN_SEL_SUB : LINEN_MUTED2;
+    /* Left gutter: the now-playing bars for the playing track, else its
+     * (per-disc) track number (collection-detail.jsx). */
+    const char *playing = player_active() ? player_track_name() : 0;
+    if (playing && name_eq_ci(e->name, playing)) {
+        nowplaying_bars(15, ry + 6, is_sel ? LINEN_SEL_FG : LINEN_INK,
+                        mmio_read32(USEC_TIMER_ADDR));
+    } else {
+        char num[6];
+        u32_to_dec(num, (unsigned)(g_track_num[idx] ? g_track_num[idx]
+                                                    : idx + 1));
+        int nw = text_width(num, FONT_SMALL);
+        ui_text(num_rx - nw, ry + 15, num, FONT_SMALL, nc);
+    }
+    /* Duration on the right (from the index); the title must stop before it. */
+    int title_right = LCD_WIDTH - 16;
+    if (g_track_dur[idx]) {
+        char dts[FMT_TIME_MAX];
+        fmt_time(dts, g_track_dur[idx]);
+        int dw = text_width(dts, text_font_bold_11());
+        ui_text(LCD_WIDTH - 16 - dw, ry + 15, dts, text_font_bold_11(),
+                is_sel ? LINEN_SEL_SUB : LINEN_MUTED_D);
+        title_right = LCD_WIDTH - 16 - dw - 8;
+    }
+    /* Title (clean — number gutter provides the index), indented past it,
+     * CLIPPED before the duration so a long title can't overlap it; the
+     * selected row's long title scrolls (marquee). */
+    const text_font_t *tf = is_sel ? FONT_HEADER : FONT_ROW;
+    /* Prefer the real tag title (bound from the index): the filename is
+     * FAT-sanitized (e.g. "WHO CARES?" -> "WHO CARES_"), the tag isn't. */
+    const char *tt = g_track_title[idx] ? g_track_title[idx]
+                                        : track_display(e->name);
+    if (is_sel) {
+        mq_text(title_x, ry + 15, title_right - title_x, tt, tf, fg,
+                LINEN_SEL_BG, ry, ry + ROW_H);
+    } else {
+        ui_text_clip(title_x, ry + 15, tt, tf, fg, title_x, title_right);
+    }
+}
+
+/* The selected track's position in the display view (which interleaves the
+ * "Disc N" header rows), i.e. the row space the scroll window works in. */
+static int detail_sel_view(int sel)
+{
+    for (int i = 0; i < g_det_view_n; i++) {
+        if (g_det_view[i] == (int16_t)sel) return i;
+    }
+    return 0;
+}
+
 static void detail_render(int sel)
 {
     console_clear(LINEN_SURFACE);
@@ -1076,12 +1196,11 @@ static void detail_render(int sel)
     for (const char *p = (g_album_track_n == 1) ? " track" : " tracks"; *p; p++)
         meta[mi++] = *p;
     /* Append total runtime ("11 tracks · 1h 41m") when durations are known
-     * (index path). collection-detail.jsx meta line. */
-    uint32_t tot_s = 0;
-    for (int i = 0; i < g_browse_n; i++) tot_s += g_track_dur[i];
-    if (tot_s > 0) {
+     * (index path). Summed ONCE in detail_load_meta — this runs on every paint.
+     * collection-detail.jsx meta line. */
+    if (g_detail_total_s > 0) {
         for (const char *p = " " UI_GLYPH_MIDDOT " "; *p; p++) meta[mi++] = *p;
-        uint32_t tot_m = (tot_s + 59u) / 60u;      /* round UP to whole minutes */
+        uint32_t tot_m = (g_detail_total_s + 59u) / 60u;  /* round UP to minutes */
         uint32_t hh = tot_m / 60u, mm = tot_m % 60u;
         if (hh > 0) {
             mi += u32_to_dec(meta + mi, hh);
@@ -1101,78 +1220,11 @@ static void detail_render(int sel)
     }
     /* Scroll over the display view (tracks + any "Disc N" headers), centered on
      * the selected track's position within it. */
-    int sel_view = 0;
-    for (int i = 0; i < g_det_view_n; i++) {
-        if (g_det_view[i] == (int16_t)sel) { sel_view = i; break; }
-    }
-    int top = scroll_window(sel_view, g_det_view_n, DET_ROWS);
-    const char *playing = player_active() ? player_track_name() : 0;
-    /* Single-disc albums have no "DISC N" header rows, so the per-disc number
-     * gutter is wasted width — pull the numbers and titles left to reclaim it. */
-    int multi_disc = 0;
-    for (int i = 0; i < g_det_view_n; i++) {
-        if (g_det_view[i] < 0) { multi_disc = 1; break; }
-    }
-    int num_rx  = multi_disc ? 30 : 24;   /* track-number right-align x */
-    int title_x = multi_disc ? 38 : 30;   /* title left x               */
+    int top = scroll_window(detail_sel_view(sel), g_det_view_n, DET_ROWS);
     for (int r = 0; r < DET_ROWS; r++) {
         int vi = top + r;
         if (vi >= g_det_view_n) break;
-        int ry = DET_LIST_Y0 + r * ROW_H;
-        int16_t v = g_det_view[vi];
-        if (v < 0) {                          /* a "Disc N" section header */
-            char h[12];
-            int hi = 0;
-            for (const char *p = "DISC "; *p; p++) h[hi++] = *p;
-            u32_to_dec(h + hi, (unsigned)(-(int)v - 1));
-            ui_text(14, ry + 15, h, FONT_SMALL, LINEN_MUTED_D);
-            continue;
-        }
-        int idx = v;
-        const browse_entry_t *e = &g_browse[idx];
-        int is_sel = (idx == sel);
-        if (is_sel) {
-            fill_round_rect(6, ry + 1, LCD_WIDTH - 16, ROW_H - 2, 4, LINEN_SEL_BG);
-        }
-        uint16_t fg = is_sel ? LINEN_SEL_FG : LINEN_INK;
-        uint16_t nc = is_sel ? LINEN_SEL_SUB : LINEN_MUTED2;
-        /* Left gutter: the now-playing bars for the playing track, else its
-         * (per-disc) track number (collection-detail.jsx). */
-        if (playing && name_eq_ci(e->name, playing)) {
-            nowplaying_bars(15, ry + 6, is_sel ? LINEN_SEL_FG : LINEN_INK,
-                            mmio_read32(USEC_TIMER_ADDR));
-        } else {
-            char num[6];
-            u32_to_dec(num, (unsigned)(g_track_num[idx] ? g_track_num[idx]
-                                                        : idx + 1));
-            int nw = text_width(num, FONT_SMALL);
-            ui_text(num_rx - nw, ry + 15, num, FONT_SMALL, nc);
-        }
-        /* Duration on the right (from the index); the title must stop before it. */
-        int title_right = LCD_WIDTH - 16;
-        if (g_track_dur[idx]) {
-            char dts[FMT_TIME_MAX];
-            fmt_time(dts, g_track_dur[idx]);
-            int dw = text_width(dts, text_font_bold_11());
-            ui_text(LCD_WIDTH - 16 - dw, ry + 15, dts, text_font_bold_11(),
-                    is_sel ? LINEN_SEL_SUB : LINEN_MUTED_D);
-            title_right = LCD_WIDTH - 16 - dw - 8;
-        }
-        /* Title (clean — number gutter provides the index), indented past it,
-         * CLIPPED before the duration so a long title can't overlap it; the
-         * selected row's long title scrolls (marquee). */
-        const text_font_t *tf = is_sel ? FONT_HEADER : FONT_ROW;
-        /* Prefer the real tag title (bound from the index): the filename is
-         * FAT-sanitized (e.g. "WHO CARES?" -> "WHO CARES_"), the tag isn't. */
-        const char *tt = g_track_title[idx] ? g_track_title[idx]
-                                            : track_display(e->name);
-        if (is_sel) {
-            mq_text(title_x, ry + 15, title_right - title_x, tt, tf, fg,
-                    LINEN_SEL_BG, ry, ry + ROW_H);
-        } else {
-            text_draw_clip(console_fb(), LCD_WIDTH, LCD_HEIGHT, title_x, ry + 15,
-                           tt, tf, fg, title_x, title_right);
-        }
+        detail_row_draw(r, vi);
     }
     scrollbar_render(DET_LIST_Y0, top, DET_ROWS, g_det_view_n);
 }
@@ -1203,6 +1255,27 @@ static void albumlist_queue_chips(void)
     }
 }
 
+/* One album row at list-row `r` showing album-view entry `idx`. Split out of
+ * albumlist_render so a selection move can repaint just the rows that changed. */
+static void albumlist_row_draw(int r, int idx)
+{
+    const lib_album_t *e = &g_albums[g_albumview[idx]];
+    /* (Re)queue the visible rows every paint — idempotent for a slot that
+     * already holds this album, and it's what gets a cover for rows past the
+     * bulk prefetch in albumlist_queue_chips when the library has more albums
+     * than the cache has slots. */
+    artcache_queue(idx, e->thm_clus, e->thm_size, e->art_clus, e->art_size);
+    const uint16_t *chip = artcache_get(idx);
+    if (!chip) chip = g_chip_ph;           /* reserve the space meanwhile       */
+    /* Show "Album" as the title and the artist as a sub-line (parsed from the
+     * "Artist - Album" folder name). In an artist's own list the artist sub
+     * is redundant, so drop it there. */
+    char artist[NAME_MAX + 1], album[NAME_MAX + 1];
+    split_artist_album(e->folder, artist, album);
+    const char *sub = (!g_artist_filter[0] && artist[0]) ? artist : 0;
+    list_row_tall(r, album, sub, 0, 1, idx == g_br_sel, 0, chip);
+}
+
 /* Album LIST (browser depth 0): the folder list with the design chrome, each
  * album row carrying a 22x22 cover chip (or a placeholder until it loads). */
 static void albumlist_render(int sel)
@@ -1226,20 +1299,7 @@ static void albumlist_render(int sel)
     for (int r = 0; r < LIST_ROWS2; r++) {
         int idx = top + r;
         if (idx >= g_albumview_n) break;
-        const lib_album_t *e = &g_albums[g_albumview[idx]];
-        /* (Re)queue the visible rows every paint — idempotent for a slot that
-         * already holds this album, and it's what gets a cover for rows past the
-         * bulk prefetch above in a library with more albums than cache slots. */
-        artcache_queue(idx, e->thm_clus, e->thm_size, e->art_clus, e->art_size);
-        const uint16_t *chip = artcache_get(idx);
-        if (!chip) chip = g_chip_ph;           /* reserve the space meanwhile       */
-        /* Show "Album" as the title and the artist as a sub-line (parsed from the
-         * "Artist - Album" folder name). In an artist's own list the artist sub
-         * is redundant, so drop it there. */
-        char artist[NAME_MAX + 1], album[NAME_MAX + 1];
-        split_artist_album(e->folder, artist, album);
-        const char *sub = (!g_artist_filter[0] && artist[0]) ? artist : 0;
-        list_row_tall(r, album, sub, 0, 1, idx == sel, 0, chip);
+        albumlist_row_draw(r, idx);
     }
     scrollbar_render(LIST_Y0, top, LIST_ROWS2, g_albumview_n);
 }
@@ -1337,6 +1397,11 @@ static void albumview_build(const char *artist_filter)
     }
 }
 
+static void artists_row_draw(int r, int idx)
+{
+    list_row(r, g_artists[idx].name, 0, 0, 1, idx == g_artist_sel, 0, 0);
+}
+
 static void artists_render(int sel)
 {
     console_clear(LINEN_SURFACE);
@@ -1354,7 +1419,7 @@ static void artists_render(int sel)
     for (int r = 0; r < LIST_ROWS; r++) {
         int idx = top + r;
         if (idx >= g_artists_n) break;
-        list_row(r, g_artists[idx].name, 0, 0, 1, idx == sel, 0, 0);
+        artists_row_draw(r, idx);
     }
     scrollbar_render(LIST_Y0, top, LIST_ROWS, g_artists_n);
 }
@@ -1861,14 +1926,21 @@ static void library_play_song(fat32_t *fs, int songview_idx)
     uint16_t sel_song = g_songview[songview_idx];
 
     load_bar("Loading Songs", 0);
-    player_set_shuffle(0);
+    /* Shuffle is the user's setting, not something picking a song turns off:
+     * forcing it off here left the player un-shuffled for the rest of the
+     * session while the UI kept showing the SHUF token. */
+    player_set_shuffle(g_settings.shuffle);
     player_queue_begin();
     int start = 0, added = 0;
     for (int i = 0; i < g_songview_n; i++) {
         if ((i & 63) == 0) load_bar("Loading Songs", i * 100 / g_songview_n);
         lib_song_t *s = &g_songs[g_songview[i]];
-        if (!s->file_clus) continue;              /* unresolved on disk — skip */
+        /* Record the start position BEFORE the resolved-check: a pick that the
+         * index lists but the disk no longer has would otherwise leave start at
+         * 0 and play the top of the list. Pointing at `added` lands on the next
+         * resolved song instead. */
         if (g_songview[i] == sel_song) start = added;
+        if (!s->file_clus) continue;              /* unresolved on disk — skip */
         browse_entry_t e;
         int k = 0;
         for (; s->file[k] && k < NAME_MAX; k++) e.name[k] = s->file[k];
@@ -1884,6 +1956,7 @@ static void library_play_song(fat32_t *fs, int songview_idx)
         added++;
     }
     load_bar("Loading Songs", 100);
+    if (start >= added) start = (added > 0) ? added - 1 : 0;   /* nothing after it */
     player_queue_commit(start);
     hal_volume_set(g_volume);
 }
@@ -1942,7 +2015,20 @@ static void shuffle_songs_play(fat32_t *fs)
     }
     load_bar("Shuffling Songs", 100);
     player_queue_commit(0);
+    /* The queue is ALREADY shuffled, so it was committed in plain order — but
+     * restore the user's setting now, or Shuffle stays off for everything played
+     * afterwards while the UI still shows SHUF. */
+    player_set_shuffle(g_settings.shuffle);
     hal_volume_set(g_volume);
+}
+
+static void songs_row_draw(int r, int idx)
+{
+    lib_song_t *sg = &g_songs[g_songview[idx]];
+    char dur[FMT_TIME_MAX];
+    if (sg->duration_s) fmt_time(dur, sg->duration_s); else dur[0] = '\0';
+    list_row_titled(r, sg->title, sg->artist[0] ? sg->artist : 0,
+                    dur[0] ? dur : 0, idx == g_song_sel, 0);
 }
 
 static void songs_render(int sel)
@@ -1961,13 +2047,16 @@ static void songs_render(int sel)
     for (int r = 0; r < LIST_ROWS2; r++) {
         int idx = top + r;
         if (idx >= g_songview_n) break;
-        lib_song_t *sg = &g_songs[g_songview[idx]];
-        char dur[FMT_TIME_MAX];
-        if (sg->duration_s) fmt_time(dur, sg->duration_s); else dur[0] = '\0';
-        list_row_titled(r, sg->title, sg->artist[0] ? sg->artist : 0,
-                        dur[0] ? dur : 0, idx == sel, 0);
+        songs_row_draw(r, idx);
     }
     scrollbar_render(LIST_Y0, top, LIST_ROWS2, g_songview_n);
+}
+
+static void genres_row_draw(int r, int idx)
+{
+    char cnt[8];
+    u32_to_dec(cnt, (unsigned)g_genre_count[idx]);
+    list_row(r, g_genres[idx], 0, cnt, 0, idx == g_genre_sel, 0, 0);
 }
 
 static void genres_render(int sel)
@@ -1986,9 +2075,7 @@ static void genres_render(int sel)
     for (int r = 0; r < LIST_ROWS; r++) {
         int idx = top + r;
         if (idx >= g_genres_n) break;
-        char cnt[8];
-        u32_to_dec(cnt, (unsigned)g_genre_count[idx]);
-        list_row(r, g_genres[idx], 0, cnt, 0, idx == sel, 0, 0);
+        genres_row_draw(r, idx);
     }
     scrollbar_render(LIST_Y0, top, LIST_ROWS, g_genres_n);
 }
@@ -1999,6 +2086,19 @@ static void genres_render(int sel)
  * SELECT jumps to a track. Reached via SELECT on the Now Playing screen.
  * ------------------------------------------------------------------------- */
 static int g_queue_sel, g_queue_accum;
+
+static void queue_row_draw(int r, int idx)
+{
+    int is_sel = (idx == g_queue_sel);
+    list_row(r, track_display(player_queue_name(idx)), 0, 0, 0, is_sel,
+             player_queue_is_dir(idx), 0);
+    if (idx == player_queue_current()) {      /* the currently-playing track */
+        int ry = LIST_Y0 + r * ROW_H;
+        nowplaying_bars(LCD_WIDTH - 22, ry + 7,
+                        is_sel ? LINEN_SEL_FG : LINEN_INK,
+                        mmio_read32(USEC_TIMER_ADDR));
+    }
+}
 
 static void queue_render(int sel)
 {
@@ -2019,15 +2119,7 @@ static void queue_render(int sel)
     for (int r = 0; r < LIST_ROWS; r++) {
         int idx = top + r;
         if (idx >= n) break;
-        int is_sel = (idx == sel);
-        list_row(r, track_display(player_queue_name(idx)), 0, 0, 0, is_sel,
-                 player_queue_is_dir(idx), 0);
-        if (idx == cur) {                 /* the currently-playing track */
-            int ry = LIST_Y0 + r * ROW_H;
-            nowplaying_bars(LCD_WIDTH - 22, ry + 7,
-                            is_sel ? LINEN_SEL_FG : LINEN_INK,
-                            mmio_read32(USEC_TIMER_ADDR));
-        }
+        queue_row_draw(r, idx);
     }
     scrollbar_render(LIST_Y0, top, LIST_ROWS, n);
 }
@@ -2038,7 +2130,6 @@ static void queue_render(int sel)
  * entry. Slider rows use a brief edit mode (SELECT toggles it, then the wheel
  * adjusts) so the wheel can still move the selection otherwise.
  * ------------------------------------------------------------------------- */
-static settings_t g_settings;
 static int g_set_screen;                  /* current settings_screen_t          */
 static int g_set_sel;                     /* selection within g_set_screen      */
 static int g_set_root_sel;                /* saved ROOT selection               */
@@ -2336,12 +2427,10 @@ static void nowplaying_render(const char *name, uint32_t elapsed_s,
             0, LCD_HEIGHT);   /* now-playing title has room — no row clip */
 
     if (m->have && m->artist[0]) {
-        text_draw_clip(console_fb(), LCD_WIDTH, LCD_HEIGHT, mx, 114, m->artist,
-                       FONT_SUB, LINEN_MUTED_D, mx, mr);
+        ui_text_clip(mx, 114, m->artist, FONT_SUB, LINEN_MUTED_D, mx, mr);
     }
     if (m->have && m->album[0]) {
-        text_draw_clip(console_fb(), LCD_WIDTH, LCD_HEIGHT, mx, 130, m->album,
-                       FONT_SUB, LINEN_MUTED2, mx, mr);
+        ui_text_clip(mx, 130, m->album, FONT_SUB, LINEN_MUTED2, mx, mr);
     }
 
     /* --- times + a bigger, rounded progress bar centred in the lower band --- */
@@ -2424,15 +2513,28 @@ static int g_menu_accum;
 
 /* Generic menu renderer over a {label, active} list. `back` draws the header
  * back chevron (off for the root menu). */
+/* The item list + selection the menu rows are drawn from — set by
+ * menu_render_list (and by list_view_current, for the partial repaint path)
+ * so menu_row_draw has the same row-drawing signature as every other list. */
+static const menu_item_t *g_menu_items;
+static int                g_menu_sel;
+
+static void menu_row_draw(int r, int idx)
+{
+    list_row(r, g_menu_items[idx].label, 0, 0, 1 /*chevron*/, idx == g_menu_sel,
+             !g_menu_items[idx].active /*greyed*/, 0);
+}
+
 static void menu_render_list(const char *title, const menu_item_t *items,
                              int n, int sel, int back)
 {
+    g_menu_items = items;
+    g_menu_sel   = sel;
     console_clear(LINEN_SURFACE);
     status_strip_render();
     header_render(title, "", back);
     for (int i = 0; i < n && i < LIST_ROWS; i++) {
-        list_row(i, items[i].label, 0, 0, 1 /*chevron*/, i == sel,
-                 !items[i].active /*greyed*/, 0);
+        menu_row_draw(i, i);
     }
 }
 
@@ -2468,13 +2570,6 @@ static int      g_scr_n;
 static void      scr_push(screen_t s) { if (g_scr_n < SCR_STACK_MAX) g_scr[g_scr_n++] = s; }
 static void      scr_pop(void)        { if (g_scr_n > 1) g_scr_n--; }
 static screen_t  scr_cur(void)        { return g_scr[g_scr_n - 1]; }
-
-/* Browser view state (was local to the old browse loop). The album LIST (depth
- * 0) and a single album's TRACKLIST (depth 1) keep SEPARATE selections, so
- * backing out of an album returns the cursor to that album in the list rather
- * than jumping to the top. */
-static int g_br_sel, g_br_accum;      /* album list (depth 0)  */
-static int g_det_sel, g_det_accum;    /* tracklist   (depth 1) */
 
 /* Read an album's tracklist (the folder at `dir_clus`) into g_browse. Only ever
  * called at depth 1 now — the album LIST is the index-driven g_albums. */
@@ -2517,6 +2612,10 @@ static void detail_load_meta(fat32_t *fs)
         }
     }
     g_detail_multidisc = (maxd > 1);
+    /* Sum the runtime once, here — detail_render used to re-add every track's
+     * duration on every paint just to print one meta line. */
+    g_detail_total_s = 0;
+    for (int i = 0; i < g_browse_n; i++) g_detail_total_s += g_track_dur[i];
     g_det_view_n = 0;
     int prev = -1;
     for (int i = 0; i < g_browse_n && g_det_view_n < DET_VIEW_MAX - 1; i++) {
@@ -2736,19 +2835,45 @@ _Noreturn static void run_ui(fat32_t *fs)
     uint32_t last_input = mmio_read32(USEC_TIMER_ADDR);
 
     int was_active = 0;                   /* detect the active->idle edge          */
+    int last_qidx  = -1;                  /* queue position at the last pass       */
     for (;;) {
         player_pump();
 
-        /* Queue finished (last track of the album/playlist/song list ended and
-         * Repeat is off) → drop back to the main menu instead of sitting on a
-         * dead Now Playing screen — but ONLY if the user is actually ON that
-         * screen. If they're browsing elsewhere when the queue ends, leave them
-         * where they are (don't yank them out of a menu mid-navigation). */
+        /* TRACK-CHANGE EDGE — unconditional, above every screen-specific branch.
+         * Auto-advance moves the queue with no button event, and several screens
+         * paint the playing track (the status strip's name on ALL of them, the
+         * tracklist's animated bars, the queue view's bars, the main menu's "Now
+         * Playing" row). The bar animators are partial painters that only ever
+         * repaint the row they find playing, so without a full repaint here the
+         * FINISHED track's row keeps a frozen 3-bar glyph forever (one more each
+         * time a track ends) and the status strip keeps its name. Covers the
+         * play->stop transition too. */
         int now_active = player_active();
-        if (was_active && !now_active && scr_cur() == SCR_NOWPLAYING) {
-            g_scr_n = 1;
-            g_scr[0] = SCR_MENU;
-            g_main_sel = 0;
+        int now_qidx   = now_active ? player_queue_current() : -1;
+        if (now_active != was_active || now_qidx != last_qidx) {
+            dirty = 1;
+        }
+        last_qidx = now_qidx;
+
+        /* Queue finished (last track of the album/playlist/song list ended and
+         * Repeat is off): no screen may keep showing a dead player. Truncate the
+         * stack at the FIRST player view (Now Playing / Queue — the queue view is
+         * just as dead), keeping everything the user navigated through below it;
+         * an empty stack falls back to the main menu. Testing only the TOP screen
+         * left a dead Now Playing behind a Queue view, and left every other screen
+         * un-repainted. */
+        if (was_active && !now_active) {
+            for (int i = 0; i < g_scr_n; i++) {
+                if (g_scr[i] == SCR_NOWPLAYING || g_scr[i] == SCR_QUEUE) {
+                    g_scr_n = i;
+                    break;
+                }
+            }
+            if (g_scr_n == 0) {
+                g_scr[0]   = SCR_MENU;
+                g_scr_n    = 1;
+                g_main_sel = 0;
+            }
             dirty = 1;
         }
         was_active = now_active;
@@ -2828,6 +2953,17 @@ _Noreturn static void run_ui(fat32_t *fs)
              * so a sub-threshold tick that doesn't move can't click. */
             if (ev.buttons) {
                 ui_click();
+            }
+            /* Charging screen: ANY press just dismisses it, and the press is
+             * CONSUMED here — above the global transport block, which otherwise
+             * saw the same event and paused/skipped the music you were only
+             * trying to get the modal off the screen for. Same swallow pattern as
+             * the backlight wake above. */
+            if (scr_cur() == SCR_CHARGING && ev.buttons) {
+                scr_pop();
+                dirty = 1;
+                ev.buttons     = 0;
+                ev.wheel_delta = 0;
             }
             /* Transport buttons are global (work from any screen while playing),
              * like a real iPod: PLAY toggles pause, RIGHT/LEFT skip track. */
@@ -3083,6 +3219,9 @@ _Noreturn static void run_ui(fat32_t *fs)
                 int scount = settings_count(g_set_screen);
                 int slider = (settings_kind(g_set_screen, g_set_sel)
                               == SETTINGS_KIND_SLIDER);
+                /* NB `slider` is re-read before the SELECT test below: one latched
+                 * event can carry BOTH a wheel move and a button, and the move
+                 * changes which row SELECT lands on. */
                 if (ev.wheel_delta) {
                     if (g_set_editing && slider) {         /* adjust the value  */
                         int dd = ev.wheel_delta;
@@ -3103,6 +3242,8 @@ _Noreturn static void run_ui(fat32_t *fs)
                     dirty = 1;
                 }
                 if (ev.buttons & WHEEL_BTN_SELECT) {
+                    slider = (settings_kind(g_set_screen, g_set_sel)
+                              == SETTINGS_KIND_SLIDER);    /* the CURRENT row   */
                     if (slider) {
                         g_set_editing = !g_set_editing;    /* enter/exit edit   */
                     } else {
@@ -3148,11 +3289,7 @@ _Noreturn static void run_ui(fat32_t *fs)
             }
 
             case SCR_CHARGING:
-                if (ev.buttons) {                       /* any press dismisses */
-                    scr_pop();
-                    dirty = 1;
-                }
-                break;
+                break;                        /* dismissal is handled above */
             }
         }
 
