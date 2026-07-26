@@ -93,8 +93,16 @@ static void on_alarm(int sig)
 static void arm_watchdog(void)
 {
     struct itimerval it;
-    it.it_value.tv_sec = 0;
-    it.it_value.tv_usec = 200000;      /* 200 ms is eons for a bounded spin */
+    /*
+     * 5 s. This exists to catch an UNBOUNDED spin, so it only has to be longer
+     * than the driver's worst legitimate bounded one — and on the host that is
+     * far slower than on the device: a wedged bus makes power_standby do
+     * PMU_STANDBY_TRIES x I2C_BUSY_SPIN_LIMIT (4 x 65536) polls, each a logged
+     * mock call here versus a couple of register reads on real hardware. At
+     * 200 ms this fired on correct, bounded behaviour and reported it as a hang.
+     */
+    it.it_value.tv_sec = 5;
+    it.it_value.tv_usec = 0;
     it.it_interval.tv_sec = 0;
     it.it_interval.tv_usec = 0;
     signal(SIGALRM, on_alarm);
@@ -273,13 +281,8 @@ int main(void)
           out != STANDBY_STROBED);
     xpect(&c, "a permanently-BUSY bus writes no payload",
           count_writes(I2C_DATA_ADDR(1)) == 0);
-    xfail(&c, "a failed standby write does not wedge the core",
-          out != STANDBY_SPUN,
-          "hal/hw/power.c power_standby() ignores i2c_send()'s return value "
-          "and enters its `for (;;)` unconditionally, so when the bus never "
-          "goes idle the device neither sleeps nor comes back — it just stops "
-          "responding until a hard reset. The spin is only correct AFTER the "
-          "PMU has acknowledged the transition");
+    xpect(&c, "a failed standby write does not wedge the core",
+          out != STANDBY_SPUN);
 
     return xfail_done(&c);
 }

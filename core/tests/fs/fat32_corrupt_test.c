@@ -187,11 +187,8 @@ int main(int argc, char **argv)
               !budget_hit());
         xpect(&c, "cyclic: readdir reports an error rather than silent success",
               rc != 0 || !budget_hit());
-        xfail(&c, "cyclic: the same entry is not surfaced over and over",
-              seen < 64,
-              "fs/fat32.c fat32_readdir() re-enumerates the looping cluster's "
-              "entries on every pass, so a caller building a list sees the "
-              "same files repeated until its own array fills up");
+        xpect(&c, "cyclic: the same entry is not surfaced over and over",
+              seen < 64);
     }
     {
         g_reads = 0;
@@ -289,10 +286,8 @@ int main(int argc, char **argv)
     {
         /* And the name that only the stale run claims must not resolve. */
         uint32_t clus = 0, size = 0;
-        xfail(&c, "orphan-lfn: the stale long name does not resolve",
-              fat32_open(&fs, "Ghost.flac", &clus, &size) != 0,
-              "fs/fat32.c fat32_open() matches the reassembled long name "
-              "without validating its checksum against the 8.3 entry");
+        xpect(&c, "orphan-lfn: the stale long name does not resolve",
+              fat32_open(&fs, "Ghost.flac", &clus, &size) != 0);
     }
 
     /* ---- 5. a truncated volume --------------------------------------- *

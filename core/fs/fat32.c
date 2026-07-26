@@ -596,6 +596,8 @@ int fat32_readdir(fat32_t *fs, uint32_t dir_clus, fat32_dir_cb cb, void *ud)
 
     uint32_t clus  = dir_clus;
     uint32_t guard = dir_walk_limit(fs);   /* bounded walk — see the #define */
+    uint32_t slow  = dir_clus;             /* Floyd tortoise; see the loop tail */
+    uint32_t tick  = 0;
 
     while (cluster_valid(fs, clus)) {
         if (guard-- == 0) {
@@ -660,6 +662,28 @@ int fat32_readdir(fat32_t *fs, uint32_t dir_clus, fat32_dir_cb cb, void *ud)
         clus = next_cluster(fs, clus);
         if (clus == 0) {
             return FAT32_EIO;
+        }
+
+        /*
+         * Floyd cycle detection, on top of the `guard` bound above.
+         *
+         * The bound alone stops the walk, but not before it has re-enumerated
+         * the looping cluster's entries once per pass — so a caller building a
+         * list (the library scan, the browser) sees the same files repeated
+         * until its own array fills up, which looks like a corrupt library
+         * rather than a corrupt disk. Advancing `slow` at half speed and
+         * comparing catches a self-referential entry after a SINGLE pass, and
+         * any k-cycle in O(k), so the duplicates never reach the caller.
+         * O(1) memory, one extra FAT lookup every other cluster.
+         */
+        if (tick++ & 1) {
+            slow = next_cluster(fs, slow);
+            if (slow == 0) {
+                return FAT32_EIO;
+            }
+        }
+        if (cluster_valid(fs, clus) && clus == slow) {
+            return FAT32_ECORRUPT;
         }
     }
     return 0;

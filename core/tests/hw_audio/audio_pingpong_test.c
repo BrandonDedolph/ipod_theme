@@ -394,8 +394,16 @@ int main(void)
     fresh_start();
     audio_dma_isr();
     audio_dma_isr();
-    /* Three chunks have been handed out: frames 0..3*frames. The contract says
-     * the next chunk after a stop/start is the one starting at 3*frames. */
+    /*
+     * Three chunks have been handed out, so the DMA is part-way through the one
+     * starting at 2*frames — NOT finished with it. "Resumes where we left off"
+     * therefore means picking up INSIDE that chunk, not moving on to the next
+     * one: jumping to 3*frames is precisely the bug, because the unplayed
+     * remainder of chunk 2 was pulled from the ring and never heard.
+     *
+     * The mock's USEC_TIMER is a constant, so no time passes across the
+     * stop/start and the resume point is the chunk's own start.
+     */
     int32_t before = last_kick_first_sample();
     xpect(&c, "pre-stop position is where we think it is",
           before == sample_for(2u * (uint32_t)frames));
@@ -405,12 +413,10 @@ int main(void)
     hal_audio_start();
     collect_kicks();
     xpect(&c, "stop() then start() resumes kicking the DMA", g_kicks >= 1);
-    xfail(&c, "stop/start resumes where it left off (drops no audio)",
-          last_kick_first_sample() == sample_for(3u * (uint32_t)frames),
-          "hal/hw/audio.c hal_audio_start() re-primes BOTH buffers "
-          "unconditionally, so the chunk already filled but not yet played is "
-          "discarded on every resume — hal.h promises the internal buffer is "
-          "NOT cleared, and the player's pause/resume is exactly this pair");
+    xpect(&c, "stop/start resumes where it left off (drops no audio)",
+          last_kick_first_sample() == sample_for(2u * (uint32_t)frames));
+    xpect(&c, "stop/start does not skip to the next chunk",
+          last_kick_first_sample() != sample_for(3u * (uint32_t)frames));
 
     /* --- 6. a cleared source is silence, not a crash ------------------- */
     hal_audio_stop();
