@@ -55,4 +55,33 @@ void console_str(int col, int row, const char *s, uint16_t fg, uint16_t bg);
 /* Draw `value` as 8 uppercase hex digits at (col,row). */
 void console_hex32(int col, int row, uint32_t value, uint16_t fg, uint16_t bg);
 
+/* ---------------------------------------------------------------------------
+ * Damage tracking
+ *
+ * Presenting the framebuffer streams every pixel to the panel with IRQs masked,
+ * which is ruinously expensive for a repaint that only moved a selection bar one
+ * row. So the console keeps a running DAMAGE RECT: the union of every region
+ * written since the last console_damage_reset(). A caller can then present only
+ * that region (lcd_present_rect) instead of the whole frame.
+ *
+ * console_clear() damages the whole panel, so a full repaint still presents in
+ * full — the optimisation only pays off where the caller redraws selectively.
+ *
+ * Drawing that bypasses this module (anything writing through console_fb(), e.g.
+ * the Nunito text renderer) is INVISIBLE to the tracker and must report itself
+ * with console_damage_add(); otherwise a damage-only present drops those pixels.
+ * ------------------------------------------------------------------------- */
+
+/* Forget all accumulated damage (the rect becomes empty). */
+void console_damage_reset(void);
+
+/* Union a w*h rectangle at (x,y) into the damage rect, clipped to the panel.
+ * Non-positive w/h is a no-op. */
+void console_damage_add(int x, int y, int w, int h);
+
+/* Read the damage rect through the x/y/w/h out-pointers (any may be NULL;
+ * they're written only when the rect is non-empty). Returns 1 when
+ * something is damaged, 0 when the rect is empty (nothing to present). */
+int console_damage_get(int *x, int *y, int *w, int *h);
+
 #endif /* CORE_KERNEL_CONSOLE_H */
