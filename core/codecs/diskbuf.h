@@ -70,6 +70,18 @@ typedef struct {
     uint32_t          high;     /* refill stops when (wr-rd) reaches this         */
     int               filling;  /* hysteresis state: 1 = bursting, 0 = drive idle */
     int               eos;      /* backing source reached end of file             */
+    /* Backing-error plumbing. A backing read that returns 0 bytes is
+     * ambiguous — end of file, or an unreadable sector. Collapsing both to
+     * "end of stream" made one bad sector three minutes into a track look
+     * exactly like the track ending, so the player advanced and the user saw
+     * a short song. `err_fn` (optional) reports the backing source's sticky
+     * error flag; when it fires we retry the burst for a few pump passes (a
+     * spun-down drive's first read legitimately fails) and only then latch
+     * `err`, which the player reads instead of silently advancing. */
+    int             (*err_fn)(void *ud);
+    void             *err_ud;
+    int               err;      /* latched: the backing source can't be read     */
+    int               err_streak; /* consecutive failed fetches, reset on success */
 } diskbuf_t;
 
 /*
@@ -98,6 +110,18 @@ void diskbuf_as_source(diskbuf_t *db, decoder_source_t *out);
  * responsive. Returns the bytes actually read this call (0 = idle or EOF).
  */
 uint32_t diskbuf_pump(diskbuf_t *db, uint32_t chunk);
+
+/*
+ * Register the backing source's sticky-read-error probe. `fn(ud)` returns
+ * nonzero once the source has failed a read (as opposed to reaching EOF).
+ * Optional — without it a 0-byte backing read is taken as end of stream, the
+ * historical behaviour. Call after diskbuf_init.
+ */
+void diskbuf_set_error_hook(diskbuf_t *db, int (*fn)(void *ud), void *ud);
+
+/* Nonzero once the backing source has failed unrecoverably (see err_fn). The
+ * player uses this to tell "disk read error" from "end of track". */
+int diskbuf_error(const diskbuf_t *db);
 
 /* Bytes currently buffered ahead of the decoder (wr - rd). */
 uint32_t diskbuf_fill_ahead(const diskbuf_t *db);

@@ -19,6 +19,15 @@
  * needed beyond the "channels > 2" check we apply to all wrappers
  * for consistency.
  *
+ * Gapless: dr_mp3 already applies the LAME/Xing encoder delay and end
+ * padding at DECODE time (drmp3_read_pcm_frames_raw skips
+ * delayInPCMFrames at the head and stops paddingInPCMFrames short of
+ * totalPCMFrameCount), so a tagged MP3 comes out trimmed — no trim of
+ * our own is needed or wanted here. It only works while
+ * totalPCMFrameCount is the tag's value, which is why the estimate in
+ * mp3_open_stream() writes only decoder_t.total_frames and never
+ * touches the drmp3 field.
+ *
  * Lossy codec testing: MP3 isn't bit-stable across decoder
  * implementations, so the KAT compares against PCM captured *from
  * dr_mp3 itself* on first generation, not against external truth.
@@ -238,11 +247,37 @@ int mp3_open_stream(decoder_t *d, decoder_source_t *src,
         return DECODER_ERR_UNSUPPORTED;
     }
 
-    /* See mp3_open() for the total_frames scan rationale. On a streaming
-     * source this walks the file once and seeks back to the start; the
-     * source must support backward seek (ours do — it only happens here at
-     * open, never during forward playback). */
-    drmp3_uint64 pcm_frames = drmp3_get_pcm_frame_count(&s->decoder);
+    /*
+     * total_frames WITHOUT an O(file) scan.
+     *
+     * mp3_open()'s comment ("the bytes are already in memory so no I/O") is
+     * true there and FALSE here: on a streaming source the exact-count helper
+     * decodes every frame through the fat32 -> anti-skip -> read-ahead chain
+     * and then seeks back to 0, outside the buffered window, forcing the whole
+     * file to be re-read. At PIO rates a 10 MB CBR MP3 costs ~22 s of silence
+     * before the first sample.
+     *
+     * So: take the count only when the Xing/Info tag already gave it to us
+     * (drmp3_init cached it, and drmp3_get_pcm_frame_count then just subtracts
+     * the LAME encoder delay/padding — no I/O). Otherwise estimate the length
+     * from the first frame's bitrate and the size of the audio region. That is
+     * exact for CBR, and for VBR it is a length readout being a bit off rather
+     * than twenty seconds of dead air.
+     */
+    drmp3_uint64 pcm_frames;
+    if (s->decoder.totalPCMFrameCount != DRMP3_UINT64_MAX) {
+        pcm_frames = drmp3_get_pcm_frame_count(&s->decoder);
+    } else {
+        /* drmp3_init has decoded the first frame, so decoder.header holds its
+         * 4-byte MPEG header — bitrate straight out of it, no extra reads. */
+        unsigned kbps = drmp3_hdr_bitrate_kbps(s->decoder.decoder.header);
+        drmp3_uint64 audio_bytes =
+            (s->decoder.streamLength > s->decoder.streamStartOffset)
+                ? (s->decoder.streamLength - s->decoder.streamStartOffset) : 0;
+        pcm_frames = (kbps > 0 && audio_bytes > 0)
+                   ? (audio_bytes * s->decoder.sampleRate) / (kbps * 125u)
+                   : 0;                       /* 0 = unknown; the UI copes */
+    }
 
     d->opaque          = s;
     d->sample_rate     = s->decoder.sampleRate;

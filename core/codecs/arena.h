@@ -12,6 +12,14 @@
  * high_water records the peak bytes in use so the arena can be sized from a
  * real decode rather than guessed. On exhaustion alloc() returns NULL (which
  * dr_flac treats as an open failure) and sets `oom`.
+ *
+ * realloc() has a GROW-IN-PLACE fast path for the arena's most recent block,
+ * which is the case that actually matters: dr_mp3 grows its input buffer in
+ * 64 KB steps and dr_flac grows during header parse, always the newest block.
+ * Without it each growth abandoned the old copy, so a couple of steps ran a
+ * 128 KB arena dry — and an OOM there looks exactly like a normal end of
+ * track (the decoder reports 0 frames, the wrapper reports EOS). `oom` is the
+ * only evidence, so surface it (player_stats()).
  */
 #ifndef CORE_CODECS_ARENA_H
 #define CORE_CODECS_ARENA_H
@@ -25,6 +33,8 @@ typedef struct decoder_arena {
     size_t         cap;
     size_t         used;
     size_t         high_water;   /* peak `used`, for sizing                 */
+    size_t         last;         /* payload offset of the newest block, 0 = */
+                                 /*   none (a payload never starts at 0)     */
     int            oom;          /* set once an allocation didn't fit       */
 } decoder_arena_t;
 

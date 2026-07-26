@@ -19,6 +19,12 @@
  * or a starved buffer). Kept small so even that path blocks only briefly. */
 #define DISKBUF_SYNC_CHUNK (32u * 1024u)
 
+/* Failed pump fetches to ride out before declaring the backing source dead.
+ * The first read after the drive has been PARKED legitimately fails while the
+ * platter spins up; retrying across main-loop passes (rather than inside one
+ * blocking call) keeps decode and the UI alive between attempts. */
+#define DISKBUF_ERR_RETRIES 8
+
 /* Position the backing source at absolute `at`, skipping a redundant seek when
  * it is already there. Returns 1 on success, 0 if the backing seek failed. */
 static int inner_seek_to(diskbuf_t *db, int64_t at)
@@ -71,9 +77,16 @@ static uint32_t diskbuf_fetch(diskbuf_t *db, uint32_t want)
     }
     size_t n = db->inner->read(db->inner->userdata, db->buf + woff, want);
     if (n == 0) {
+        /* Zero bytes: end of file, or an unreadable sector. Only the backing
+         * source knows which, so ask it before calling this the end. */
+        if (db->err_fn && db->err_fn(db->err_ud)) {
+            db->err_streak++;
+            return 0;                     /* caller decides whether to retry */
+        }
         db->eos = 1;
         return 0;                         /* end of stream */
     }
+    db->err_streak = 0;
     db->inner_pos += (int64_t)n;
     db->wr        += (int64_t)n;
     return (uint32_t)n;
@@ -107,7 +120,14 @@ static size_t diskbuf_read(void *ud, void *dst_, size_t bytes)
          * steady state the pump keeps this from happening; this is the priming
          * / starvation fallback. */
         if (diskbuf_fetch(db, DISKBUF_SYNC_CHUNK) == 0) {
-            break;                        /* end of stream */
+            /* Nothing came back and it wasn't EOF: the disk failed under us.
+             * We're already starving here (the pump didn't keep up), so there
+             * is no time to retry — latch the error so the player can report a
+             * read failure instead of treating the short read as end of track. */
+            if (!db->eos) {
+                db->err = 1;
+            }
+            break;
         }
     }
     return done;
@@ -171,6 +191,21 @@ void diskbuf_init(diskbuf_t *db, decoder_source_t *inner,
     db->high      = high;
     db->filling   = 1;                     /* pre-load from the first pump */
     db->eos       = 0;
+    db->err_fn    = 0;
+    db->err_ud    = 0;
+    db->err       = 0;
+    db->err_streak = 0;
+}
+
+void diskbuf_set_error_hook(diskbuf_t *db, int (*fn)(void *ud), void *ud)
+{
+    db->err_fn = fn;
+    db->err_ud = ud;
+}
+
+int diskbuf_error(const diskbuf_t *db)
+{
+    return db->err;
 }
 
 void diskbuf_as_source(diskbuf_t *db, decoder_source_t *out)
@@ -192,15 +227,24 @@ uint32_t diskbuf_pump(diskbuf_t *db, uint32_t chunk)
 
     if (db->filling) {
         /* Bursting: keep reading until we top out or hit EOF, then go idle. */
-        if (db->eos || ahead >= db->high) {
+        if (db->eos || db->err || ahead >= db->high) {
             db->filling = 0;
             return 0;
         }
-        return diskbuf_fetch(db, chunk);
+        uint32_t got = diskbuf_fetch(db, chunk);
+        /* A failed (not EOF) fetch leaves us in the filling state, so the next
+         * pump pass retries — spreading the retries across main-loop passes
+         * instead of burning them inside one blocking call. Give up after a
+         * few and latch the error for the player to report. */
+        if (got == 0 && !db->eos && db->err_streak >= DISKBUF_ERR_RETRIES) {
+            db->err     = 1;
+            db->filling = 0;
+        }
+        return got;
     }
     /* Idle (drive head parked): only wake to refill once the decoder has drained
      * the buffer below the low watermark — the hysteresis that makes I/O bursty. */
-    if (!db->eos && ahead < db->low) {
+    if (!db->eos && !db->err && ahead < db->low) {
         db->filling = 1;
         return diskbuf_fetch(db, chunk);
     }

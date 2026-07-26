@@ -11,8 +11,10 @@
  * Two blocks carry what we want:
  *   - STREAMINFO (type 0): sample_rate + total_samples -> duration_s.
  *   - VORBIS_COMMENT (type 4): "KEY=value" tags. Little-endian, unlike the
- *     big-endian block headers.
- * Everything else (SEEKTABLE, PADDING, PICTURE, ...) is skipped. Parsing
+ *     big-endian block headers. Includes REPLAYGAIN_TRACK/ALBUM_GAIN.
+ *   - SEEKTABLE (type 3): entry COUNT only (the seekpoints themselves are
+ *     dr_flac's business — it parses and binary-searches them at open()).
+ * Everything else (PADDING, PICTURE, ...) is skipped. Parsing
  * stops at the block whose header sets the last-block flag.
  *
  * Freestanding-clean: no libc/libm/malloc, no allocation — all buffers are
@@ -38,7 +40,21 @@ typedef struct {
     char     genre[32];
     int      track;         /* TRACKNUMBER as int, 0 if absent                */
     int      year;          /* DATE/YEAR as int, 0 if absent                  */
+    /* ReplayGain, in 1/256 dB (so -7.28 dB -> -1864). Absent tags leave the
+     * value 0 AND the corresponding have_rg bit clear — 0 dB is a legitimate
+     * gain, so the flag is what says "a tag was present". */
+    int      rg_track_q8;   /* REPLAYGAIN_TRACK_GAIN                          */
+    int      rg_album_q8;   /* REPLAYGAIN_ALBUM_GAIN                          */
+    int      have_rg;       /* bit0 = track gain seen, bit1 = album gain seen  */
+    /* SEEKTABLE (block type 3) entry count, 0 when the file has none. Only a
+     * count: dr_flac parses the seekpoints themselves at open() and seeks
+     * through them, so duplicating the table here would be dead weight. This
+     * is the cheap "will a seek be O(log n) or a decode-from-here crawl" hint. */
+    uint32_t seek_points;
 } flac_meta_t;
+
+#define FLAC_META_RG_TRACK 1u   /* have_rg bit: REPLAYGAIN_TRACK_GAIN present */
+#define FLAC_META_RG_ALBUM 2u   /* have_rg bit: REPLAYGAIN_ALBUM_GAIN present */
 
 /*
  * Parse metadata from an open source positioned at the START of the file.

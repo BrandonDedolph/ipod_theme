@@ -90,6 +90,52 @@ int  player_active(void);
  * from "paused" (drive can safely spin down). */
 int  player_is_paused(void);
 
+/* Why the last open / auto-advance failed, so the UI can eventually say why a
+ * track was skipped instead of silently scrolling past it. Valid after any
+ * transport call and after player_pump() has ended a track. */
+enum {
+    PLAYER_OK        = 0,
+    PLAYER_ERR_OPEN  = 1,   /* the file didn't parse as FLAC/MP3 (corrupt)   */
+    PLAYER_ERR_RATE  = 2,   /* the file is fine; the DAC can't clock it      */
+    PLAYER_ERR_READ  = 3,   /* a disk read failed mid-file (NOT end of track) */
+};
+int  player_last_error(void);
+
+/*
+ * Monotonic counter, bumped once per successful open (including the deferred
+ * hand-over at the end of a track). The reliable "the audible track changed"
+ * trigger: a queue-index compare misses repeat-one, a prev-restart, and a
+ * single-track shuffle, all of which reopen the SAME index.
+ */
+uint32_t player_open_seq(void);
+
+/*
+ * Seek within the current track. player_seek_to takes an absolute position in
+ * seconds (clamped to the track length); player_seek_seconds moves relative to
+ * the current position. Both return 0 on success, -1 when nothing is playing,
+ * the codec can't seek, or a track hand-over is in flight. The DAC is stopped
+ * and re-primed across the seek but NOT re-initialised, so the codec's gain is
+ * untouched; a paused player stays paused at the new position.
+ */
+int  player_seek_to(uint32_t sec);
+int  player_seek_seconds(int delta);
+
+/*
+ * Real-time margin counters, cheap enough to leave permanently enabled (two
+ * timer reads per ~23 ms of audio and one increment in the DMA ISR). Intended
+ * for a debug screen: if decode_us_per_kframe approaches the real-time budget
+ * (22676 us/kframe at 44.1 kHz) the codec is out of headroom.
+ */
+typedef struct {
+    uint32_t decode_us_per_kframe;  /* CPU microseconds per 1000 frames decoded */
+    uint32_t ring_low_frames;       /* PCM ring low-water since the last present */
+    uint32_t underruns;             /* times the ISR found the ring short        */
+    uint32_t arena_high_water;      /* peak decoder-arena bytes this session      */
+    int      arena_oom;             /* an allocation didn't fit (track ends early) */
+} player_stats_t;
+
+const player_stats_t *player_stats(void);
+
 /* Tags + duration of the current track (parsed at open; fields empty/0 when a
  * tag is absent — fall back to the filename). */
 const flac_meta_t *player_meta(void);
@@ -116,7 +162,11 @@ int         player_queue_is_dir(int i);
 void        player_jump(int i);
 
 /* Manual track skip (Prev/Next buttons). player_prev restarts the current track
- * if >~3s in, else goes to the previous; both wrap and ignore Repeat-One. */
+ * if >~3s in, else goes to the previous, wrapping to the last entry.
+ * player_next is a NO-OP on the last track unless Repeat All is on (it used to
+ * tear playback down before discovering there was no successor, which left the
+ * whole transport inactive and therefore dead). Both ignore Repeat-One, and
+ * both leave a paused player paused at the new track. */
 void        player_next(void);
 void        player_prev(void);
 
@@ -126,5 +176,11 @@ int             player_art_ok(void);
 int             player_art_w(void);
 int             player_art_h(void);
 const uint16_t *player_art_pixels(void);
+
+/* Bumped every time the loaded art changes, INCLUDING when it is cleared for a
+ * track whose album has no cover. Use it as the cache key for any downscaled
+ * copy: the queue index doesn't change on repeat-one, and a fresh queue can
+ * start at the same index as the old one. */
+uint32_t        player_art_seq(void);
 
 #endif /* CORE_PLAYER_PLAYER_H */
