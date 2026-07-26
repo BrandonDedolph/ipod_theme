@@ -3104,9 +3104,21 @@ static int list_repaint_partial(void)
 #define WHEEL_IDLE_US   200000u            /* > this gap => new gesture, reset  */
 #define WHEEL_AZ_VEL    3                  /* velocity at which the letter shows */
 #define WHEEL_AZ_HOLD   500000u            /* ...and how long after the last tick */
+/* In letter mode the plate is the control surface, not a hint, so it lingers
+ * well past the last detent — it must not blink out while you are still
+ * deciding which letter to stop on. */
+#define WHEEL_AZ_HOLD_LETTER 1200000u
+
+/* Sustained detents at full velocity before the wheel promotes from stepping
+ * ROWS to stepping LETTERS. Deliberately a few, so a short fast flick still
+ * scrolls normally and only a real "get me across the alphabet" spin switches
+ * unit — the mode change is felt, so it must not happen by accident. */
+#define WHEEL_LETTER_RUNS 4
 
 static uint32_t g_wheel_last_us;
 static int      g_wheel_vel = 1;
+static int      g_wheel_runs;          /* consecutive detents at full velocity */
+static int      g_wheel_letters;       /* 1 = a detent moves a whole letter    */
 
 /* Called once per wheel event: fold this event's arrival time into the velocity
  * and return the current rows-per-detent multiplier. */
@@ -3116,21 +3128,46 @@ static int wheel_accel_step(void)
     uint32_t dt  = now - g_wheel_last_us;
     g_wheel_last_us = now;
     if (dt > WHEEL_IDLE_US) {
-        g_wheel_vel = 1;                              /* fresh, deliberate move */
+        g_wheel_vel     = 1;                          /* fresh, deliberate move */
+        g_wheel_runs    = 0;
+        g_wheel_letters = 0;                          /* gesture over           */
     } else if (dt < WHEEL_FAST_US) {
         if (++g_wheel_vel > WHEEL_VEL_MAX) g_wheel_vel = WHEEL_VEL_MAX;
-    } else if (g_wheel_vel > 1) {
-        g_wheel_vel--;                                /* easing off             */
+        if (g_wheel_vel == WHEEL_VEL_MAX && ++g_wheel_runs >= WHEEL_LETTER_RUNS) {
+            g_wheel_letters = 1;
+        }
+    } else {
+        g_wheel_runs = 0;                             /* easing off             */
+        if (g_wheel_vel > 1) g_wheel_vel--;
     }
     return g_wheel_vel;
 }
 
-/* True while the list is flying past fast enough to want the letter cue. */
+/* 1 while a detent should move a whole letter rather than a run of rows. */
+static int wheel_letter_mode(void)
+{
+    return g_wheel_letters;
+}
+
+/* Forget the gesture entirely. Called when the UI is taken away from the user
+ * (backlight off, panel wake, screen change) so a spin that ended before the
+ * screen slept can't still be "in progress" when they come back to it. */
+static void wheel_accel_reset(void)
+{
+    g_wheel_vel     = 1;
+    g_wheel_runs    = 0;
+    g_wheel_letters = 0;
+    g_wheel_last_us = 0;
+}
+
+/* True while the list is flying past fast enough to want the letter cue. In
+ * letter mode the plate stays up for the whole gesture: it IS the control
+ * surface then, not a hint, so it must not blink out between detents. */
 static int wheel_accelerating(void)
 {
-    if (g_wheel_vel < WHEEL_AZ_VEL) return 0;
-    return (uint32_t)(mmio_read32(USEC_TIMER_ADDR) - g_wheel_last_us)
-           < WHEEL_AZ_HOLD;
+    if (!g_wheel_letters && g_wheel_vel < WHEEL_AZ_VEL) return 0;
+    uint32_t hold = g_wheel_letters ? WHEEL_AZ_HOLD_LETTER : WHEEL_AZ_HOLD;
+    return (uint32_t)(mmio_read32(USEC_TIMER_ADDR) - g_wheel_last_us) < hold;
 }
 
 /* Uppercased first letter of `s`, '#' for anything not A-Z. */
@@ -3145,23 +3182,23 @@ static char initial_of(const char *s)
 /* The selected row's initial on the alphabetised lists (songs / artists /
  * albums), read straight off the already-sorted arrays; 0 on screens where an
  * A-Z cue would mean nothing. */
-static char list_sel_initial(void)
+static char list_initial_at(int idx)
 {
     switch (scr_cur()) {
     case SCR_SONGS:
-        if (g_songview_n > 0 && g_song_sel < g_songview_n) {
-            return initial_of(g_songs[g_songview[g_song_sel]].title);
+        if (idx >= 0 && idx < g_songview_n) {
+            return initial_of(g_songs[g_songview[idx]].title);
         }
         break;
     case SCR_ARTISTS:
-        if (g_artists_n > 0 && g_artist_sel < g_artists_n) {
-            return initial_of(artist_key(g_artists[g_artist_sel].name));
+        if (idx >= 0 && idx < g_artists_n) {
+            return initial_of(artist_key(g_artists[idx].name));
         }
         break;
     case SCR_BROWSER:
-        if (g_dir_depth == 0 && g_albumview_n > 0 && g_br_sel < g_albumview_n) {
+        if (g_dir_depth == 0 && idx >= 0 && idx < g_albumview_n) {
             char a[NAME_MAX + 1], b[NAME_MAX + 1];
-            split_artist_album(g_albums[g_albumview[g_br_sel]].folder, a, b);
+            split_artist_album(g_albums[g_albumview[idx]].folder, a, b);
             return initial_of(b);              /* albums sort by album title */
         }
         break;
@@ -3169,6 +3206,58 @@ static char list_sel_initial(void)
         break;
     }
     return 0;
+}
+
+static char list_sel_initial(void)
+{
+    switch (scr_cur()) {
+    case SCR_SONGS:   return list_initial_at(g_song_sel);
+    case SCR_ARTISTS: return list_initial_at(g_artist_sel);
+    case SCR_BROWSER: return list_initial_at(g_br_sel);
+    default:          return 0;
+    }
+}
+
+/*
+ * Letter stepping: land on the FIRST entry of the next/previous letter present
+ * in the list.
+ *
+ * Row acceleration alone tops out at WHEEL_VEL_MAX rows per detent, which on a
+ * 1200-song list still means a long spin and a letter cue that only tells you
+ * where you happen to have landed. Once the wheel is being spun in earnest the
+ * useful unit stops being the row and becomes the letter — one detent, one
+ * letter, so you can aim at "S" instead of scrubbing toward it.
+ *
+ * Walks the already-sorted view, so it is O(entries in the current letter) and
+ * needs no index. Returns `sel` unchanged when there is no further letter, so
+ * the ends of the list stop cleanly instead of wrapping under your thumb.
+ */
+static int list_letter_step(int sel, int count, int dir)
+{
+    if (count <= 0) {
+        return sel;
+    }
+    char cur = list_initial_at(sel);
+    if (cur == 0) {
+        return sel;                 /* screen has no alphabetised order */
+    }
+    int i = sel;
+    if (dir > 0) {
+        while (i < count - 1 && list_initial_at(i + 1) == cur) i++;
+        if (i >= count - 1) return sel;          /* already in the last letter */
+        return i + 1;                            /* first entry of the next    */
+    }
+    /* Backwards: to the head of this letter, and if already there, to the head
+     * of the previous one — so a back-step is never a no-op mid-letter. */
+    while (i > 0 && list_initial_at(i - 1) == cur) i--;
+    if (i != sel) {
+        return i;
+    }
+    if (i == 0) return sel;                      /* already in the first letter */
+    char prev = list_initial_at(i - 1);
+    i--;
+    while (i > 0 && list_initial_at(i - 1) == prev) i--;
+    return i;
 }
 
 /* The letter itself, on a centred plate over the flying list. */
@@ -3227,11 +3316,32 @@ static int wheel_move(int sel, int count, int8_t delta, int *accum)
     *accum += wd;
     int move = *accum / WHEEL_CLICKS_PER_ITEM;
     *accum -= move * WHEEL_CLICKS_PER_ITEM;
+
+    int old = sel;
+
+    /* Sustained fast spin on an alphabetised list: one detent = one letter.
+     * Stepping rows faster still makes you scrub past everything between here
+     * and where you're going; stepping letters lets you aim. Falls through to
+     * row acceleration on screens with no alphabetical order (list_letter_step
+     * returns `sel` unchanged there). */
+    if (move != 0 && wheel_letter_mode()) {
+        int dir  = (move > 0) ? 1 : -1;
+        int step = (move > 0) ? move : -move;
+        for (int i = 0; i < step; i++) {
+            int next = list_letter_step(sel, count, dir);
+            if (next == sel) break;              /* ran out of letters */
+            sel = next;
+        }
+        if (sel != old) {
+            ui_click();
+        }
+        return sel;
+    }
+
     /* Acceleration: one detent still moves one row when you turn the wheel
      * deliberately (vel 1), but a fast spin covers up to WHEEL_VEL_MAX rows per
      * detent — the difference between 1200 songs being reachable and not. */
     move *= vel;
-    int old = sel;
     sel += move;
     if (sel < 0)          sel = 0;
     if (sel >= count)     sel = count - 1;
@@ -3572,6 +3682,7 @@ _Noreturn static void run_ui(fat32_t *fs)
                 if (panel_slept) bl_relight = 1;         /* after the present     */
                 else             backlight_set(g_settings.backlight_bright);
                 bl_state = BL_FULL;
+                wheel_accel_reset();      /* don't resume a pre-sleep gesture */
             }
             dirty = 1;
         }
@@ -3587,6 +3698,7 @@ _Noreturn static void run_ui(fat32_t *fs)
                 if (panel_slept) bl_relight = 1;         /* after the present     */
                 else             backlight_set(g_settings.backlight_bright);
                 bl_state = BL_FULL;
+                wheel_accel_reset();      /* don't resume a pre-sleep gesture */
                 dirty = 1;                    /* repaint anything drawn while off */
                 if (was_off) {                /* swallow the wake press */
                     ev.buttons = 0;
