@@ -53,6 +53,32 @@ static void cpu_wait_ms(uint8_t ms) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Timed UI windows (volume overlay, lock/unlock plate)
+ *
+ * USEC_TIMER is a free-running 1 MHz counter, so it WRAPS every ~71.6 min. An
+ * absolute "now < deadline" compare is wrong across that wrap (the deadline
+ * looks like it's in the distant past, or a stale one springs back to life), so
+ * every timed check in this file stores a START stamp and compares an ELAPSED
+ * difference — (uint32_t)(now - t0) < span — which is wrap-correct. An expired
+ * window disarms itself so a later wrap can never re-open it.
+ * ------------------------------------------------------------------------- */
+typedef struct { uint32_t t0; int armed; } ui_window_t;
+
+static void ui_window_arm(ui_window_t *w)
+{
+    w->t0    = mmio_read32(USEC_TIMER_ADDR);
+    w->armed = 1;
+}
+
+static int ui_window_up(ui_window_t *w, uint32_t span, uint32_t now)
+{
+    if (!w->armed) return 0;
+    if ((uint32_t)(now - w->t0) < span) return 1;
+    w->armed = 0;                     /* expired: can't reopen on the next wrap */
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
  * Linen theme + Nunito faces
  * ------------------------------------------------------------------------- */
 
@@ -183,13 +209,21 @@ static void fill_round_rect_aa(int x, int y, int w, int h, int r, uint16_t c)
  * row, or the now-playing title). Render fns set it while drawing; the main loop
  * scrolls it in place via a tiny partial present. `text` points at our own
  * copy (g_mq.last), so callers may pass a transient buffer safely. */
+/* The fingerprint buffer must hold the LONGEST target we can be handed, or the
+ * comparison below sees "changed" every frame and the scroll phase resets
+ * forever (the title never actually advances). Every target is a display name
+ * or a tag string, both bounded by NAME_MAX; anything longer is rejected as
+ * non-scrollable in mq_set rather than silently truncated into that trap. */
+#define MQ_TEXT_MAX NAME_MAX
+
 static struct {
     int                active, x, y, w;
+    int                tw;                 /* measured text width (px)            */
     const char        *text;
     const text_font_t *font;
     uint16_t           ink, bg;
     uint32_t           t0;                 /* phase clock origin (target start)   */
-    char               last[72];           /* content fingerprint of that target  */
+    char               last[MQ_TEXT_MAX + 1]; /* content fingerprint of that target */
     int                last_x, last_y;
     int                cy0, cy1;           /* vertical clip (keeps it in its row) */
 } g_mq;
@@ -227,7 +261,9 @@ static int mq_offset(int tw, int w, uint32_t t_us)
 
 /* Draw `s` in the window [x, x+w) at baseline y. Clears the text band to bg
  * first, then draws it at its current scroll offset (`t_us` = phase time). */
-static void draw_marquee(int x, int y, int w, const char *s,
+/* `tw` is the caller's already-measured text_width(s, font) — measuring it here
+ * too made the marquee path walk the same string three times per frame. */
+static void draw_marquee(int x, int y, int w, const char *s, int tw,
                          const text_font_t *font, uint16_t ink, uint16_t bg,
                          uint32_t t_us, int cy0, int cy1)
 {
@@ -242,7 +278,7 @@ static void draw_marquee(int x, int y, int w, const char *s,
     if (top < cy0) top = cy0;
     if (bot > cy1) bot = cy1;
     if (bot > top) console_fill_rect(x, top, w, bot - top, bg);
-    int off = mq_offset(text_width(s, font), w, t_us);
+    int off = mq_offset(tw, w, t_us);
     text_draw_clip_v(console_fb(), LCD_WIDTH, LCD_HEIGHT, x - off, y, s, font, ink,
                      x, x + w, cy0, cy1);
 }
@@ -252,28 +288,35 @@ static void draw_marquee(int x, int y, int w, const char *s,
  * target changes — compared by CONTENT + position, since the now-playing title
  * reuses one buffer across tracks so a pointer check would miss the change — so
  * the scroll always restarts from the truncated look on a new row/track. */
-static void mq_set(int x, int y, int w, const char *text,
-                   const text_font_t *font, uint16_t ink, uint16_t bg,
-                   int cy0, int cy1)
+static int mq_set(int x, int y, int w, const char *text, int tw,
+                  const text_font_t *font, uint16_t ink, uint16_t bg,
+                  int cy0, int cy1)
 {
-    if (text_width(text, font) <= w) return;
+    if (tw <= w) return 0;
+
+    /* Length-explicit: a target that doesn't FIT the fingerprint can't be
+     * compared (its tail is the part that differs), so it would read "changed"
+     * every frame and never scroll. Leave it static instead — it still renders
+     * clipped, it just doesn't animate. */
+    int len = 0;
+    while (text[len]) {
+        if (++len > MQ_TEXT_MAX) return 0;
+    }
 
     int changed = (x != g_mq.last_x || y != g_mq.last_y);
     if (!changed) {
         int i = 0;
-        while (i < (int)sizeof g_mq.last - 1 && text[i] && text[i] == g_mq.last[i]) {
-            i++;
-        }
-        changed = (text[i] != g_mq.last[i]);
+        while (i < len && text[i] == g_mq.last[i]) i++;
+        changed = (i != len || g_mq.last[len] != '\0');
     }
     if (changed) {
         int i = 0;
-        for (; i < (int)sizeof g_mq.last - 1 && text[i]; i++) g_mq.last[i] = text[i];
+        for (; i < len; i++) g_mq.last[i] = text[i];
         g_mq.last[i] = '\0';
         g_mq.last_x = x; g_mq.last_y = y;
         g_mq.t0 = mmio_read32(USEC_TIMER_ADDR);
     }
-    g_mq.active = 1; g_mq.x = x; g_mq.y = y; g_mq.w = w;
+    g_mq.active = 1; g_mq.x = x; g_mq.y = y; g_mq.w = w; g_mq.tw = tw;
     /* Point at our OWN copy (g_mq.last), not the caller's buffer: some callers
      * (e.g. the album list) build the row text in a per-iteration stack local,
      * which is dead by the time the scroll tick re-reads it — a dangling pointer
@@ -281,6 +324,7 @@ static void mq_set(int x, int y, int w, const char *text,
      * the current target's content, so the periodic redraw stays valid. */
     g_mq.text = g_mq.last; g_mq.font = font; g_mq.ink = ink; g_mq.bg = bg;
     g_mq.cy0 = cy0; g_mq.cy1 = cy1;
+    return 1;
 }
 
 /* Draw `text` in [x, x+w) at baseline y AND register it as the marquee target.
@@ -292,17 +336,18 @@ static void mq_text(int x, int y, int w, const char *text,
                     const text_font_t *font, uint16_t ink, uint16_t bg,
                     int cy0, int cy1)
 {
-    if (text_width(text, font) <= w) {
-        /* Fits: just draw it. NO background band clear — the caller already
-         * painted the row/selection background, and a clear at y-ascent would
-         * bleed ABOVE the selection bar (ascent 14 > the sub-row title lift of
-         * 11) and paint a black bar over the row above. */
+    /* Measure ONCE and pass it down (mq_set + draw_marquee both need it). */
+    int tw = text_width(text, font);
+    if (tw <= w || !mq_set(x, y, w, text, tw, font, ink, bg, cy0, cy1)) {
+        /* Fits (or is too long to marquee safely): just draw it. NO background
+         * band clear — the caller already painted the row/selection background,
+         * and a clear at y-ascent would bleed ABOVE the selection bar (ascent 14 >
+         * the sub-row title lift of 11) and paint a black bar over the row above. */
         text_draw_clip(console_fb(), LCD_WIDTH, LCD_HEIGHT, x, y, text, font, ink,
                        x, x + w);
         return;
     }
-    mq_set(x, y, w, text, font, ink, bg, cy0, cy1);
-    draw_marquee(x, y, w, text, font, ink, bg,
+    draw_marquee(x, y, w, text, tw, font, ink, bg,
                  mmio_read32(USEC_TIMER_ADDR) - g_mq.t0, cy0, cy1);
 }
 
@@ -342,6 +387,11 @@ static int         g_albums_n;
 static uint16_t    g_albumview[LIB_MAX_ALBUMS];
 static int         g_albumview_n;
 
+/* Set whenever a library load hits one of the fixed caps (LIB_MAX_SONGS /
+ * LIB_MAX_ALBUMS / ARTISTS_MAX / LIB_MAX_GENRES / FOLDER_MAP_MAX), so the
+ * truncation isn't silent — the About screen says the library didn't fit. */
+static int         g_lib_truncated;
+
 /* Album art (folder.art) location captured while enumerating the current
  * folder; handed to player_play_queue so the player owns/validates it. */
 static uint32_t g_art_clus, g_art_size;
@@ -352,9 +402,11 @@ static uint32_t g_art_clus, g_art_size;
 static char g_artist_filter[NAME_MAX + 1];
 
 /* Output volume (WM8758 codec gain, 0..100) + how long the on-screen volume
- * overlay stays up after the last wheel tick (volume-demo.jsx: ~1.5 s then fade). */
-static int      g_volume = 70;
-static uint32_t g_vol_show_until;
+ * overlay stays up after the last wheel tick (volume-demo.jsx: ~1.5 s then fade).
+ * The window is START-stamped, not deadline-stamped — see ui_window_t. */
+static int         g_volume = 70;
+static ui_window_t g_vol_show;
+#define VOL_SHOW_US 1500000u
 
 /* Case-insensitive ASCII match of a dirent name against a literal. */
 static int name_eq_ci(const char *a, const char *b)
@@ -432,6 +484,14 @@ static int mn_utf8_next(const unsigned char **p)
         cp = (cp << 6) | (q[i] & 0x3F);
     }
     *p += n + 1;
+    /* Reject NON-MINIMAL (overlong) encodings and the UTF-16 surrogate range:
+     * "C0 80" would otherwise decode to U+0000 (a NUL smuggled into a name) and
+     * "E0 80 AF" to '/' (a path separator that never appears as a real byte).
+     * The whole sequence is still consumed, so progress is unchanged. */
+    static const int min_cp[3] = { 0x80, 0x800, 0x10000 };
+    if (cp < min_cp[n - 1] || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+        return 0xFFFD;
+    }
     return cp;
 }
 
@@ -620,8 +680,9 @@ static int browse_collect(void *ud, const fat32_dirent_t *e)
 /* Hold-switch lock state. While g_locked, all wheel/button input is swallowed
  * (playback keeps running); a brief plate flashes on the engage/disengage edge,
  * and a small padlock stays in the status strip while held. */
-static int      g_locked;
-static uint32_t g_lock_flash_until;
+static int         g_locked;
+static ui_window_t g_lock_flash;
+#define LOCK_FLASH_US 1000000u
 
 /* Small padlock glyph (system-screens.jsx corner lock): body + shackle. */
 static void draw_lock_glyph(int x, int y, uint16_t c)
@@ -890,7 +951,10 @@ static int u32_to_dec(char *dst, unsigned v)
     return t;
 }
 
-static void fmt_time(char *buf, uint32_t s);   /* "M:SS", defined below         */
+/* "M:SS" (minutes uncapped): up to 10 minute digits + ':' + 2 + NUL. Every
+ * fmt_time buffer is sized FMT_TIME_MAX so a long track can't overrun it. */
+#define FMT_TIME_MAX 16
+static void fmt_time(char *buf, uint32_t s);   /* defined below                 */
 
 /* Format "a / b" into dst (needs >= 12 bytes). */
 static void fmt_count(char *dst, int a, int b)
@@ -1087,7 +1151,7 @@ static void detail_render(int sel)
         /* Duration on the right (from the index); the title must stop before it. */
         int title_right = LCD_WIDTH - 16;
         if (g_track_dur[idx]) {
-            char dts[8];
+            char dts[FMT_TIME_MAX];
             fmt_time(dts, g_track_dur[idx]);
             int dw = text_width(dts, text_font_bold_11());
             ui_text(LCD_WIDTH - 16 - dw, ry + 15, dts, text_font_bold_11(),
@@ -1163,7 +1227,11 @@ static void albumlist_render(int sel)
         int idx = top + r;
         if (idx >= g_albumview_n) break;
         const lib_album_t *e = &g_albums[g_albumview[idx]];
-        const uint16_t *chip = (idx < ARTCACHE_SLOTS) ? artcache_get(idx) : 0;
+        /* (Re)queue the visible rows every paint — idempotent for a slot that
+         * already holds this album, and it's what gets a cover for rows past the
+         * bulk prefetch above in a library with more albums than cache slots. */
+        artcache_queue(idx, e->thm_clus, e->thm_size, e->art_clus, e->art_size);
+        const uint16_t *chip = artcache_get(idx);
         if (!chip) chip = g_chip_ph;           /* reserve the space meanwhile       */
         /* Show "Album" as the title and the artist as a sub-line (parsed from the
          * "Artist - Album" folder name). In an artist's own list the artist sub
@@ -1226,17 +1294,17 @@ static void build_artists(void)
                 break;
             }
         }
-        if (!found && g_artists_n < ARTISTS_MAX) {
-            lib_artist_t *a = &g_artists[g_artists_n];
-            int k = 0;
-            for (; artist[k] && k < NAME_MAX; k++) a->name[k] = artist[k];
-            a->name[k]  = '\0';
-            a->thm_clus = g_albums[i].thm_clus;   /* first album = artist's chip */
-            a->thm_size = g_albums[i].thm_size;
-            a->art_clus = g_albums[i].art_clus;
-            a->art_size = g_albums[i].art_size;
-            g_artists_n++;
-        }
+        if (found) continue;
+        if (g_artists_n >= ARTISTS_MAX) { g_lib_truncated = 1; continue; }
+        lib_artist_t *a = &g_artists[g_artists_n];
+        int k = 0;
+        for (; artist[k] && k < NAME_MAX; k++) a->name[k] = artist[k];
+        a->name[k]  = '\0';
+        a->thm_clus = g_albums[i].thm_clus;   /* first album = artist's chip */
+        a->thm_size = g_albums[i].thm_size;
+        a->art_clus = g_albums[i].art_clus;
+        a->art_size = g_albums[i].art_size;
+        g_artists_n++;
     }
 
     /* Insertion-sort A->Z by artist_key (so "The xyz" files under X); the whole
@@ -1337,7 +1405,10 @@ static int        g_lib_indexed;                  /* loaded from CORELIB.IDX    
 
 /* Root-folder name -> cluster map (built once), for resolving an index record's
  * album folder to a cluster without a per-album directory read. */
-#define FOLDER_MAP_MAX 160
+/* MUST be >= LIB_MAX_ALBUMS: a record whose album folder didn't make the map
+ * resolves to cluster 0 and every one of its tracks is silently dropped at load
+ * (the old 160 cap quietly lost albums 161..256 of a full library). */
+#define FOLDER_MAP_MAX LIB_MAX_ALBUMS
 static struct { char name[NAME_MAX + 1]; uint32_t clus, hash; } g_folder_map[FOLDER_MAP_MAX];
 static int      g_folder_n;
 static uint32_t g_idx_clus, g_idx_size;           /* CORELIB.IDX location        */
@@ -1380,6 +1451,7 @@ static int16_t genre_intern(const char *g)
         g_genres[g_genres_n][k] = '\0';
         return (int16_t)g_genres_n++;
     }
+    g_lib_truncated = 1;               /* out of genre slots */
     return -1;
 }
 
@@ -1390,7 +1462,7 @@ static void album_intern(const char *folder, uint32_t clus)
     for (int i = 0; i < g_albums_n; i++) {
         if (g_albums[i].clus == clus) return;      /* already listed */
     }
-    if (g_albums_n >= LIB_MAX_ALBUMS) return;
+    if (g_albums_n >= LIB_MAX_ALBUMS) { g_lib_truncated = 1; return; }
     int k = 0;
     for (; folder[k] && k < NAME_MAX; k++) g_albums[g_albums_n].folder[k] = folder[k];
     g_albums[g_albums_n].folder[k] = '\0';
@@ -1449,7 +1521,8 @@ static int index_root_cb(void *ud, const fat32_dirent_t *e)
         g_idx_size = e->size;
         return 0;
     }
-    if (e->is_dir && !is_junk_dir(e->name) && g_folder_n < FOLDER_MAP_MAX) {
+    if (e->is_dir && !is_junk_dir(e->name)) {
+        if (g_folder_n >= FOLDER_MAP_MAX) { g_lib_truncated = 1; return 0; }
         copy_display_name(g_folder_map[g_folder_n].name, e->name, 0);
         /* The index's folder[] field is 64 bytes, so the host writer stores at
          * most 63 chars + NUL (build_index.py ascii_field). Cap the on-disk name
@@ -1604,6 +1677,7 @@ static int library_load_index(fat32_t *fs)
                      ((uint32_t)hdr[10] << 16) | ((uint32_t)hdr[11] << 24);
 
     g_songs_n = g_genres_n = g_albums_n = 0;
+    g_lib_truncated = 0;
     /* Read the index in 16 KB batches (64 records) rather than 256 B at a time:
      * a 256 B stream read pulls a whole 2048 B FS-sector and hands back 256 B, so
      * per-record reads re-fetched each sector 8x. Batching is ~14 big reads for
@@ -1652,6 +1726,7 @@ static int library_load_index(fat32_t *fs)
         load_bar("Loading Library",            /* first ~75% = reading the index */
                  count ? (int)(n * 75u / count) : 0);
     }
+    if (n < count) g_lib_truncated = 1;    /* ran out of song slots (or of index) */
     library_finish();
     library_resolve_art(fs);               /* index each album's cover clusters */
     g_lib_indexed = 1;
@@ -1665,7 +1740,9 @@ static void library_scan(fat32_t *fs)
 {
     if (g_lib_scanned) return;
     g_songs_n = g_genres_n = g_scan_dirs_n = g_albums_n = 0;
+    g_lib_truncated = 0;
     fat32_readdir(fs, lib_root(fs), scan_dirs_cb, 0);
+    if (g_scan_dirs_n >= BROWSE_MAX) g_lib_truncated = 1;   /* folder list full */
     for (int d = 0; d < g_scan_dirs_n && g_songs_n < LIB_MAX_SONGS; d++) {
         g_scan_files_n = 0;
         g_scan_art_clus = g_scan_art_size = 0;
@@ -1704,6 +1781,7 @@ static void library_scan(fat32_t *fs)
             s->genre      = (ok && m.have) ? genre_intern(m.genre) : -1;
         }
     }
+    if (g_songs_n >= LIB_MAX_SONGS) g_lib_truncated = 1;   /* out of song slots */
     library_finish();
     library_resolve_art(fs);               /* index each album's cover clusters */
     g_lib_scanned = 1;
@@ -1884,7 +1962,7 @@ static void songs_render(int sel)
         int idx = top + r;
         if (idx >= g_songview_n) break;
         lib_song_t *sg = &g_songs[g_songview[idx]];
-        char dur[8];
+        char dur[FMT_TIME_MAX];
         if (sg->duration_s) fmt_time(dur, sg->duration_s); else dur[0] = '\0';
         list_row_titled(r, sg->title, sg->artist[0] ? sg->artist : 0,
                         dur[0] ? dur : 0, idx == sel, 0);
@@ -1985,6 +2063,16 @@ static void settings_render_cur(void)
     if (g_set_screen == SETTINGS_ABOUT) {
         settings_about_render(g_bat_pct, g_bat_mv, g_total_mb, g_free_mb,
                               g_songs_n, g_albums_n, g_artists_n);
+        /* The counts above are capped (LIB_MAX_SONGS/ALBUMS, ARTISTS_MAX,
+         * LIB_MAX_GENRES). When a load actually hit one of those caps, say so —
+         * otherwise a library that's too big just looks like it lost tracks.
+         * Drawn here, over the shared About panel, in the gap between the device
+         * hero (baseline 62) and the stat columns (baseline 100). */
+        if (g_lib_truncated) {
+            ui_text_centered(80, "Library too large " UI_GLYPH_MIDDOT
+                                 " some items not shown",
+                             FONT_SMALL, BATT_LOW_RED);
+        }
     } else {
         settings_render(g_set_screen, &g_settings, g_set_sel);
     }
@@ -2001,13 +2089,13 @@ static void boot_splash(void)
     lcd_present_fb(console_framebuffer());
 }
 
-/* Format `s` seconds as "M:SS" (minutes uncapped). */
+/* Format `s` seconds as "M:SS" — minutes genuinely uncapped (the old two-digit
+ * write rendered 123 min as "23:SS"). `buf` must be >= FMT_TIME_MAX bytes. */
 static void fmt_time(char *buf, uint32_t s)
 {
     uint32_t m = s / 60, ss = s % 60;
     int i = 0;
-    if (m >= 10) buf[i++] = (char)('0' + (m / 10) % 10);
-    buf[i++] = (char)('0' + m % 10);
+    i += u32_to_dec(buf, m);          /* 1..10 digits, no truncation */
     buf[i++] = ':';
     buf[i++] = (char)('0' + ss / 10);
     buf[i++] = (char)('0' + ss % 10);
@@ -2214,6 +2302,10 @@ static void nowplaying_render(const char *name, uint32_t elapsed_s,
     const uint16_t *art = np_art_120();
     if (art) {
         console_blit565(ax, ay, NP_ART_DIM, NP_ART_DIM, art);
+    } else {
+        /* No cover: a neutral tile, same as the list rows' chip placeholder —
+         * bare surface here read as a rendering bug, not as "no artwork". */
+        console_fill_rect(ax, ay, NP_ART_DIM, NP_ART_DIM, LINEN_BORDER);
     }
 
     /* --- metadata column, vertically centred beside the taller art --------- */
@@ -2225,7 +2317,10 @@ static void nowplaying_render(const char *name, uint32_t elapsed_s,
     /* "TRACK N OF M" eyebrow above the title (design's "Track 04 of 11"). */
     int tot = player_queue_len();
     if (tot > 0) {
-        char num[24];
+        /* 8 + 12 literal chars + two decimals (<=10 digits each) + NUL. The old
+         * 24-byte buffer only covered ONE-digit numbers on both sides: any album
+         * with >=10 tracks overran it, and a 1200-entry shuffle queue by 5. */
+        char num[8 + 12 + 10 + 10 + 1];
         int p = 0;
         for (const char *q = "TRACK   "; *q; q++) num[p++] = *q;   /* air after TRACK */
         p += u32_to_dec(num + p, (unsigned)(player_queue_current() + 1));
@@ -2250,7 +2345,7 @@ static void nowplaying_render(const char *name, uint32_t elapsed_s,
     }
 
     /* --- times + a bigger, rounded progress bar centred in the lower band --- */
-    char te[12], tr[12];
+    char te[FMT_TIME_MAX], tr[FMT_TIME_MAX + 1];   /* tr carries a '-' prefix */
     fmt_time(te, elapsed_s);
     uint32_t rem = (total_s > elapsed_s) ? total_s - elapsed_s : 0;
     tr[0] = '-';
@@ -2273,7 +2368,7 @@ static void nowplaying_render(const char *name, uint32_t elapsed_s,
     }
 
     /* Volume overlay rides on top for ~1.5 s after a wheel adjustment. */
-    if (mmio_read32(USEC_TIMER_ADDR) < g_vol_show_until) {
+    if (ui_window_up(&g_vol_show, VOL_SHOW_US, mmio_read32(USEC_TIMER_ADDR))) {
         volume_overlay_render(g_volume);
     }
 }
@@ -2640,7 +2735,6 @@ _Noreturn static void run_ui(fat32_t *fs)
     int      bl_state   = BL_FULL;
     uint32_t last_input = mmio_read32(USEC_TIMER_ADDR);
 
-    const char *last_tn = 0;              /* re-apply volume on track change       */
     int was_active = 0;                   /* detect the active->idle edge          */
     for (;;) {
         player_pump();
@@ -2696,14 +2790,6 @@ _Noreturn static void run_ui(fat32_t *fs)
             play_held = 0;
         }
 
-        /* Auto-advance re-inits the codec (resetting its gain), so re-apply our
-         * volume whenever the playing track changes. */
-        const char *tn = player_active() ? player_track_name() : 0;
-        if (tn && tn != last_tn) {
-            hal_volume_set(g_volume);
-        }
-        last_tn = tn;
-
         /* Hold-switch edge (a cheap GPIO read, independent of the wheel block
          * which is gated off while held): flash the lock/unlock plate and toggle
          * the input lock. Playback is untouched. */
@@ -2711,7 +2797,7 @@ _Noreturn static void run_ui(fat32_t *fs)
         if (held != hold_prev) {
             hold_prev = held;
             g_locked  = held;
-            g_lock_flash_until = mmio_read32(USEC_TIMER_ADDR) + 1000000u;
+            ui_window_arm(&g_lock_flash);
             last_input = mmio_read32(USEC_TIMER_ADDR);   /* wake the backlight    */
             if (bl_state != BL_FULL) {
                 backlight_set(g_settings.backlight_bright);
@@ -2958,7 +3044,7 @@ _Noreturn static void run_ui(fat32_t *fs)
                     (void)prev_vol;   /* no click on volume — it's a slider, not nav */
                     hal_volume_set(g_volume);
                     g_settings.volume = g_volume;         /* keep Settings in sync */
-                    g_vol_show_until = mmio_read32(USEC_TIMER_ADDR) + 1500000u;
+                    ui_window_arm(&g_vol_show);
                     dirty = 1;
                 }
                 if ((ev.buttons & WHEEL_BTN_SELECT) && player_active()) {
@@ -3094,7 +3180,7 @@ _Noreturn static void run_ui(fat32_t *fs)
          * the context + plate once, hold it, then repaint underneath when it
          * fades. Suppresses the normal render while up. */
         uint32_t now_us = mmio_read32(USEC_TIMER_ADDR);
-        if (now_us < g_lock_flash_until) {
+        if (ui_window_up(&g_lock_flash, LOCK_FLASH_US, now_us)) {
             if (!lock_flashing && bl_state != BL_OFF) {
                 paint_current_screen();
                 lock_plate_render(g_locked);
@@ -3121,7 +3207,7 @@ _Noreturn static void run_ui(fat32_t *fs)
         } else if (scr_cur() == SCR_NOWPLAYING) {
             uint32_t nowv    = mmio_read32(USEC_TIMER_ADDR);
             uint32_t elapsed = player_elapsed_s();
-            int vol_active = nowv < g_vol_show_until;
+            int vol_active = ui_window_up(&g_vol_show, VOL_SHOW_US, nowv);
             int expiring   = np_vol_prev && !vol_active;   /* overlay just faded */
 
             /* Auto-advance changes the track WITHOUT a button event; the art +
@@ -3256,7 +3342,7 @@ _Noreturn static void run_ui(fat32_t *fs)
             /* Phase clock (g_mq.t0) + target-change detection live in mq_set, so
              * this just paces the redraw at the shared live offset. */
             if ((uint32_t)(nowm - last_mq) >= 33000u) {   /* ~30fps               */
-                draw_marquee(g_mq.x, g_mq.y, g_mq.w, g_mq.text, g_mq.font,
+                draw_marquee(g_mq.x, g_mq.y, g_mq.w, g_mq.text, g_mq.tw, g_mq.font,
                              g_mq.ink, g_mq.bg, nowm - g_mq.t0, g_mq.cy0, g_mq.cy1);
                 int ptop = g_mq.y - text_ascent(g_mq.font);
                 int pbot = g_mq.y + text_descent(g_mq.font);
