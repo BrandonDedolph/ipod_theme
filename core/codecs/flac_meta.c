@@ -117,6 +117,50 @@ static int parse_leading_int(const uint8_t *src, uint32_t len)
     return any ? v : 0;
 }
 
+/*
+ * Parse a ReplayGain value — "-7.28 dB", "+3.5 dB", "0.00" — into 1/256 dB.
+ * Sign, integer part, then up to 2 fraction digits; anything after (the " dB"
+ * suffix, extra digits) is ignored. Returns 1 when a number was found.
+ */
+static int parse_gain_q8(const uint8_t *src, uint32_t len, int *out)
+{
+    uint32_t j = 0;
+    int      neg = 0;
+
+    while (j < len && (src[j] == ' ' || src[j] == '\t')) {
+        j++;
+    }
+    if (j < len && (src[j] == '+' || src[j] == '-')) {
+        neg = (src[j] == '-');
+        j++;
+    }
+    int whole = 0, any = 0;
+    while (j < len && src[j] >= '0' && src[j] <= '9') {
+        if (whole < 1000) {                /* clamp — real gains are within ±60 dB */
+            whole = whole * 10 + (src[j] - '0');
+        }
+        any = 1;
+        j++;
+    }
+    int frac_hundredths = 0;
+    if (j < len && src[j] == '.') {
+        j++;
+        for (int d = 0; d < 2; d++) {
+            int digit = (j < len && src[j] >= '0' && src[j] <= '9') ? (src[j++] - '0') : 0;
+            frac_hundredths = frac_hundredths * 10 + digit;
+            any = 1;
+        }
+    }
+    if (!any) {
+        return 0;
+    }
+    /* q8 dB = (whole*100 + hundredths) * 256 / 100, rounded. */
+    int total = whole * 100 + frac_hundredths;
+    int q8    = (total * 256 + 50) / 100;
+    *out = neg ? -q8 : q8;
+    return 1;
+}
+
 /* Case-insensitive match of key[0..klen) against a NUL-terminated ASCII name. */
 static int key_is(const uint8_t *key, uint32_t klen, const char *name)
 {
@@ -172,6 +216,14 @@ static void apply_comment(flac_meta_t *out, const uint8_t *c, uint32_t len)
         int y = parse_leading_int(val, vlen);
         if (y > 0) {
             out->year = y;
+        }
+    } else if (key_is(key, klen, "REPLAYGAIN_TRACK_GAIN")) {
+        if (parse_gain_q8(val, vlen, &out->rg_track_q8)) {
+            out->have_rg |= FLAC_META_RG_TRACK;
+        }
+    } else if (key_is(key, klen, "REPLAYGAIN_ALBUM_GAIN")) {
+        if (parse_gain_q8(val, vlen, &out->rg_album_q8)) {
+            out->have_rg |= FLAC_META_RG_ALBUM;
         }
     }
 }
@@ -305,6 +357,11 @@ int flac_meta_read(decoder_source_t *src, flac_meta_t *out)
             parse_streaminfo(out, si);
             out->have = 1;
             if (!skip_bytes(src, len - FM_STREAMINFO_LEN)) {
+                break;
+            }
+        } else if (type == 3) {            /* SEEKTABLE — count only, then skip */
+            out->seek_points = len / 18u;  /* 18 bytes per seekpoint */
+            if (!skip_bytes(src, len)) {
                 break;
             }
         } else if (type == 4) {            /* VORBIS_COMMENT */
