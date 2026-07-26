@@ -1100,7 +1100,6 @@ void player_pump(void)
 }
 
 int player_active(void) { return g_pl_active; }
-int player_is_paused(void) { return g_pl_paused; }
 
 const char *player_track_name(void) { return g_queue[g_queue_idx].name; }
 

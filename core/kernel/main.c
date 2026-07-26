@@ -30,6 +30,7 @@
 #include "clock.h"
 #include "cache.h"
 #include "console.h"
+#include "panic.h"
 #include "config.h"
 #include "../ui/text.h"
 #include "../ui/thumb.h"
@@ -807,6 +808,53 @@ static int browse_collect(void *ud, const fat32_dirent_t *e)
  * and a small padlock stays in the status strip while held. */
 static int         g_locked;
 static ui_window_t g_lock_flash;
+
+/*
+ * Now-Playing scrub (seek) state.
+ *
+ * The decoders and the player have supported seeking all along
+ * (player_seek_to); nothing was bound to it, which made long tracks,
+ * podcasts and audiobooks effectively unusable.
+ *
+ * The wheel aims at a target rather than seeking on every detent: a seek stops
+ * the DAC, re-primes the ring and on a backward jump rewinds the file, so doing
+ * that per detent would stutter and hammer the disk. The target is committed
+ * once the wheel goes quiet (SCRUB_COMMIT_US), which is also what makes a long
+ * drag across a track cost exactly one seek.
+ */
+#define SCRUB_COMMIT_US  600000u     /* wheel quiet this long -> perform seek  */
+#define SCRUB_EXIT_US   4000000u     /* ...and this long -> back to volume     */
+#define SCRUB_STEP_S          5      /* seconds per detent at rest             */
+
+static int      g_np_scrub;          /* 1 = wheel seeks instead of volume      */
+static uint32_t g_scrub_target_s;    /* where the wheel is currently aiming    */
+static uint32_t g_scrub_last_us;     /* last detent, for commit/exit timing    */
+static int      g_scrub_dirty;       /* target moved since the last commit     */
+
+/* SELECT press-length arbitration on Now Playing: tap = scrubber, hold = queue. */
+#define SEL_HOLD_US 450000u
+
+static uint32_t g_sel_down_us;
+static int      g_sel_pending;
+
+static int np_scrubbing(void)
+{
+    return g_np_scrub;
+}
+
+static void scrub_enter(void)
+{
+    g_np_scrub       = 1;
+    g_scrub_target_s = player_elapsed_s();
+    g_scrub_last_us  = mmio_read32(USEC_TIMER_ADDR);
+    g_scrub_dirty    = 0;
+}
+
+static void scrub_exit(void)
+{
+    g_np_scrub    = 0;
+    g_scrub_dirty = 0;
+}
 #define LOCK_FLASH_US 1000000u
 
 /* Small padlock glyph (system-screens.jsx corner lock): body + shackle. */
@@ -1109,8 +1157,11 @@ static void fmt_count(char *dst, int a, int b)
 #define DET_LIST_Y0  108                  /* tracklist first row top              */
 #define DET_ROWS     5                     /* visible rows: (240-108)/24 = 5 fit   */
 
-#define ART_RAW_MAX  (12 + 120 * 120 * 2)  /* a full 120x120 CoreArt file          */
-static uint8_t  g_art_scratch[ART_RAW_MAX];      /* raw folder.art read buffer      */
+/* The raw folder.art staging buffer is the ART CACHE's — see artcache_scratch().
+ * There used to be a second, byte-identical ART_RAW_MAX array here: 28,812 bytes
+ * duplicated for no reason, since the cache's copy is only live inside
+ * artcache_pump() and this path (entering an album) never pumps. */
+#define ART_RAW_MAX  ARTCACHE_SCRATCH_SZ
 static uint16_t g_detail_art[DET_ART * DET_ART]; /* downscaled 56x56 hero           */
 static int      g_detail_art_ok;
 static char     g_album_title[NAME_MAX + 1];     /* album part of "Artist - Album" */
@@ -1142,27 +1193,27 @@ static uint32_t g_detail_total_s;
 static void detail_art_load(fat32_t *fs)
 {
     g_detail_art_ok = 0;
-    if (g_art_clus == 0 || g_art_size < 12 || g_art_size > sizeof g_art_scratch) {
+    if (g_art_clus == 0 || g_art_size < 12 || g_art_size > (uint32_t)ART_RAW_MAX) {
         return;
     }
-    int32_t n = fat32_read_file(fs, g_art_clus, g_art_scratch, g_art_size);
+    uint8_t *raw = artcache_scratch();
+    int32_t  n   = fat32_read_file(fs, g_art_clus, raw, g_art_size);
     if (n < 12) {
         return;
     }
-    if (g_art_scratch[0] != 'C' || g_art_scratch[1] != 'A' ||
-        g_art_scratch[2] != 'R' || g_art_scratch[3] != 'T') {
+    if (raw[0] != 'C' || raw[1] != 'A' || raw[2] != 'R' || raw[3] != 'T') {
         return;
     }
-    int w = g_art_scratch[6] | (g_art_scratch[7] << 8);
-    int h = g_art_scratch[8] | (g_art_scratch[9] << 8);
+    int w = raw[6] | (raw[7] << 8);
+    int h = raw[8] | (raw[9] << 8);
     if (w <= 0 || h <= 0 || w > 120 || h > 120) {
         return;
     }
     if ((int32_t)(12 + w * h * 2) > n) {
         return;
     }
-    thumb_downscale_rgb565((const uint16_t *)(g_art_scratch + 12), w, h,
-                           g_detail_art, DET_ART, DET_ART);
+    thumb_box_rgb565((const uint16_t *)(raw + 12), w, h,
+                     g_detail_art, DET_ART, DET_ART);
     g_detail_art_ok = 1;
 }
 
@@ -2564,10 +2615,14 @@ static const uint16_t *np_art_120(void)
     if (w == NP_ART_DIM && h == NP_ART_DIM) {
         return player_art_pixels();        /* native size: blit as-is */
     }
-    int key = player_queue_current();
+    /* Keyed on the ART generation, not the queue index: a freshly built queue
+     * that happens to start on the same index would otherwise re-use the
+     * PREVIOUS album's downscaled cover. player_art_seq() bumps whenever the
+     * art changes, including when it is cleared. */
+    int key = (int)player_art_seq();
     if (key != g_np_art_key) {
-        thumb_downscale_rgb565(player_art_pixels(), w, h,
-                               g_np_art, NP_ART_DIM, NP_ART_DIM);
+        thumb_box_rgb565(player_art_pixels(), w, h,
+                         g_np_art, NP_ART_DIM, NP_ART_DIM);
         g_np_art_key = key;
     }
     return g_np_art;
@@ -2586,26 +2641,49 @@ static void nowplaying_transport_render(uint32_t elapsed_s, uint32_t total_s)
 {
     console_fill_rect(0, NP_TR_Y, LCD_WIDTH, NP_TR_H, LINEN_SURFACE);
 
-    char te[FMT_TIME_MAX], tr[FMT_TIME_MAX + 1];   /* tr carries a '-' prefix */
-    fmt_time(te, elapsed_s);
-    uint32_t rem = (total_s > elapsed_s) ? total_s - elapsed_s : 0;
-    tr[0] = '-';
-    fmt_time(tr + 1, rem);                             /* "−M:SS" remaining     */
-    ui_text(18, 198, te, FONT_SUB, LINEN_MUTED_D);
+    /* While scrubbing, the bar and the left-hand time show the TARGET, not the
+     * live position — the wheel is aiming at a destination and the readout has
+     * to be what you are aiming at. The right-hand side becomes the delta from
+     * where playback actually is, so a long seek is legible ("+3:41") instead
+     * of a remaining figure you have to subtract in your head. */
+    int      scrub = np_scrubbing();
+    uint32_t shown = scrub ? g_scrub_target_s : elapsed_s;
+
+    char te[FMT_TIME_MAX], tr[FMT_TIME_MAX + 2];   /* tr carries a sign prefix */
+    fmt_time(te, shown);
+    if (scrub) {
+        uint32_t d = (shown > elapsed_s) ? shown - elapsed_s : elapsed_s - shown;
+        tr[0] = (shown >= elapsed_s) ? '+' : '-';
+        fmt_time(tr + 1, d);
+    } else {
+        uint32_t rem = (total_s > elapsed_s) ? total_s - elapsed_s : 0;
+        tr[0] = '-';
+        fmt_time(tr + 1, rem);                         /* "−M:SS" remaining     */
+    }
+    ui_text(18, 198, te, FONT_SUB, scrub ? LINEN_INK : LINEN_MUTED_D);
     int wtr = text_width(tr, FONT_SUB);
-    ui_text(LCD_WIDTH - 18 - wtr, 198, tr, FONT_SUB, LINEN_MUTED_D);
+    ui_text(LCD_WIDTH - 18 - wtr, 198, tr, FONT_SUB,
+            scrub ? LINEN_INK : LINEN_MUTED_D);
 
     /* Taller rounded-cap bar (INK fill on a faint ink track, Theme1Live fg).
      * bh 8 with AA pill caps reads smoother than the old 6px integer-stepped
      * caps. */
     int pbx = 18, by = 209, bw = LCD_WIDTH - 36, bh = 8;
     fill_round_rect_aa(pbx, by, bw, bh, bh / 2, LINEN_TRK);
-    int fw = (total_s > 0) ? (int)((elapsed_s * (uint32_t)bw) / total_s) : 0;
+    int fw = (total_s > 0) ? (int)((shown * (uint32_t)bw) / total_s) : 0;
     if (fw > bw) fw = bw;
     if (fw >= bh) {
         fill_round_rect_aa(pbx, by, fw, bh, bh / 2, LINEN_INK);
     } else if (fw > 0) {
         console_fill_rect(pbx, by, fw, bh, LINEN_INK);
+    }
+    /* A playhead at the target so the aim point is readable even where the
+     * filled length is ambiguous (very short or very long tracks). */
+    if (scrub) {
+        int hx = pbx + fw - 1;
+        if (hx < pbx)          hx = pbx;
+        if (hx > pbx + bw - 3) hx = pbx + bw - 3;
+        console_fill_rect(hx, by - 3, 3, bh + 6, LINEN_INK);
     }
 }
 
@@ -3983,7 +4061,26 @@ _Noreturn static void run_ui(fat32_t *fs)
             }
 
             case SCR_NOWPLAYING:
-                if (ev.wheel_delta) {                    /* wheel = volume        */
+                /* Scrubbing: the wheel aims at a position instead of setting
+                 * volume. Accelerates with the spin so a 70-minute track is
+                 * crossable, but one deliberate detent is always SCRUB_STEP_S. */
+                if (ev.wheel_delta && np_scrubbing() && player_active()) {
+                    int vel   = wheel_accel_step(ev.wheel_delta);
+                    int units = ev.wheel_delta / CW_WHEEL_SENSITIVITY;
+                    if (units == 0) {
+                        units = (ev.wheel_delta > 0) ? 1 : -1;
+                    }
+                    int32_t  step  = (int32_t)units * SCRUB_STEP_S * vel;
+                    int32_t  t     = (int32_t)g_scrub_target_s + step;
+                    uint32_t total = player_total_s();
+                    if (t < 0) t = 0;
+                    if (total > 0 && t > (int32_t)total) t = (int32_t)total;
+                    g_scrub_target_s = (uint32_t)t;
+                    g_scrub_last_us  = mmio_read32(USEC_TIMER_ADDR);
+                    g_scrub_dirty    = 1;
+                    np_last          = 0xFFFFFFFFu;   /* force a transport repaint */
+                    dirty            = 1;
+                } else if (ev.wheel_delta) {             /* wheel = volume        */
                     /* The wheel reports raw position units (~CW_WHEEL_SENSITIVITY
                      * per detent), which is why volume used to leap ~10 at a time.
                      * Quantise to whole detents: a single slow detent nudges the
@@ -4009,11 +4106,14 @@ _Noreturn static void run_ui(fat32_t *fs)
                     ui_window_arm(&g_vol_show);
                     dirty = 1;
                 }
+                /* SELECT is now press-length sensitive here: a tap toggles the
+                 * scrubber (what SELECT does on Now Playing on a real iPod, and
+                 * far and away the more frequent action), a hold opens the queue
+                 * view. Only the down-edge is recorded — the decision is made in
+                 * the per-pass block below, once the press length is known. */
                 if ((ev.buttons & WHEEL_BTN_SELECT) && player_active()) {
-                    g_queue_sel = player_queue_current();  /* open the queue view */
-                    g_queue_accum = 0;
-                    scr_push(SCR_QUEUE);
-                    dirty = 1;
+                    g_sel_down_us = mmio_read32(USEC_TIMER_ADDR);
+                    g_sel_pending = 1;
                 }
                 if (ev.buttons & WHEEL_BTN_MENU) {
                     scr_pop();                          /* back, keep playing */
@@ -4183,9 +4283,61 @@ _Noreturn static void run_ui(fat32_t *fs)
         settings_commit(0);
 
         const uint32_t disk_idle_us = 20000000u;   /* 20 s: saves ~100 mA, no thrash */
-        if ((!player_active() || player_is_paused())
+        if ((!player_active() || player_paused())
             && !ata_is_parked() && idle > disk_idle_us) {
             ata_standby();
+        }
+
+        /*
+         * SELECT press-length arbitration (Now Playing). Decided here rather
+         * than at the down-edge because the length is only known once the button
+         * is released or the hold threshold passes. Held past SEL_HOLD_US opens
+         * the queue immediately (so the gesture confirms itself under your
+         * thumb); released before it toggles the scrubber.
+         */
+        if (g_sel_pending) {
+            uint32_t sel_held = mmio_read32(USEC_TIMER_ADDR) - g_sel_down_us;
+            int      down     = (clickwheel_buttons() & WHEEL_BTN_SELECT) != 0;
+            if (down && sel_held >= SEL_HOLD_US) {
+                g_sel_pending = 0;
+                scrub_exit();
+                g_queue_sel   = player_queue_current();
+                g_queue_accum = 0;
+                scr_push(SCR_QUEUE);
+                dirty = 1;
+            } else if (!down) {
+                g_sel_pending = 0;
+                if (np_scrubbing()) scrub_exit();
+                else                scrub_enter();
+                np_last = 0xFFFFFFFFu;          /* repaint the transport band */
+                dirty   = 1;
+            }
+        }
+
+        /*
+         * Deferred seek. The target is committed once the wheel has been quiet
+         * for SCRUB_COMMIT_US, so dragging across a track costs ONE seek rather
+         * than one per detent — a seek stops the DAC, re-primes the ring, and on
+         * a backward jump rewinds the file. Scrub mode then lapses on its own,
+         * so the wheel cannot be left silently controlling position.
+         */
+        if (np_scrubbing()) {
+            uint32_t quiet = mmio_read32(USEC_TIMER_ADDR) - g_scrub_last_us;
+            if (g_scrub_dirty && quiet >= SCRUB_COMMIT_US) {
+                g_scrub_dirty = 0;
+                if (player_seek_to(g_scrub_target_s) != 0) {
+                    g_scrub_target_s = player_elapsed_s();   /* refused: snap back */
+                }
+                np_last = 0xFFFFFFFFu;
+                dirty   = 1;
+            } else if (!g_scrub_dirty && quiet >= SCRUB_EXIT_US) {
+                scrub_exit();
+                np_last = 0xFFFFFFFFu;
+                dirty   = 1;
+            }
+            if (!player_active()) {
+                scrub_exit();                    /* track ended under the scrubber */
+            }
         }
 
         /* Panel wake: the instant we leave the fully-off state, re-enable the LCD
@@ -4444,6 +4596,18 @@ _Noreturn static void run_ui(fat32_t *fs)
          * by the 100 Hz timer ISR, so this costs no responsiveness. */
         if (!player_active()) {
             cpu_wait_ms(10);
+        }
+
+        /*
+         * Supervisor stack guard. crt0 paints the region below _stack_limit, so
+         * this is an O(1) look at the low words — cheap enough to run every idle
+         * pass. A breach means a deep UI call chain has already written past the
+         * bottom of the stack, which is silent memory corruption; panic() at
+         * least turns it into a readable screen with the faulting PC instead of
+         * a mystery freeze or garbled state hours later.
+         */
+        if (stack_guard_breached()) {
+            panic(PANIC_STACK, 0);
         }
     }
 }

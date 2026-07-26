@@ -85,11 +85,6 @@ void player_set_repeat(int mode);
 /* 1 while a track is loaded (playing OR paused). */
 int  player_active(void);
 
-/* 1 while playback is paused (a track is loaded but the DAC is stopped). Lets
- * callers distinguish "actively playing" (needs the disk for anti-skip refills)
- * from "paused" (drive can safely spin down). */
-int  player_is_paused(void);
-
 /* Why the last open / auto-advance failed, so the UI can eventually say why a
  * track was skipped instead of silently scrolling past it. Valid after any
  * transport call and after player_pump() has ended a track. */
