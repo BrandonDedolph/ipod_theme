@@ -270,6 +270,10 @@ static void fill_round_rect_aa(int x, int y, int w, int h, int r, uint16_t c)
     if (2 * r > h) r = h / 2;
     if (r > RR_MAX_R) r = RR_MAX_R;
     console_fill_rect(x, y + r, w, h - 2 * r, c);          /* solid middle band  */
+    /* The corner quadrants are blended straight into the framebuffer below, so
+     * they'd be invisible to the damage tracker (the edge fills stop at x+r).
+     * Report the whole rect once. */
+    console_damage_add(x, y, w, h);
     uint16_t *fb = console_fb();
     const uint8_t *mask = aa_corner_mask(r);
     for (int ry = 0; ry < r; ry++) {
