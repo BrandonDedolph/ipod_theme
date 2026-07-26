@@ -52,6 +52,12 @@ void mmio_mock_queue_read(uint32_t addr, const uint32_t *seq, size_t n);
 const mmio_event *mmio_mock_log(void);
 size_t            mmio_mock_log_len(void);
 
+/* Events dropped after the log filled. Nonzero means the recorded
+ * grammar is only a PREFIX of what the driver actually did — expected
+ * when a test deliberately wedges a bus and the driver spins to its
+ * bounded limit. */
+size_t            mmio_mock_dropped(void);
+
 /* Convenience: count recorded events of a given op+addr (any width). */
 size_t mmio_mock_count(mmio_op op, uint32_t addr);
 

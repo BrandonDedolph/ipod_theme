@@ -192,6 +192,14 @@ uint32_t diskbuf_fill_ahead(const diskbuf_t *db)
     return 64u * 1024u * 1024u;
 }
 
+/* No disk error: the player distinguishes a persistent read failure from a
+ * clean end-of-track, and the queue tests exercise the end-of-track side. */
+int diskbuf_error(const diskbuf_t *db)
+{
+    (void)db;
+    return 0;
+}
+
 /* ---- fake metadata ---------------------------------------------------- */
 
 int flac_meta_read(decoder_source_t *src, flac_meta_t *out)
@@ -313,6 +321,18 @@ int hal_audio_init(uint32_t rate, uint16_t channels)
     return (rate == 44100u && channels == 2u) ? 0 : -1;
 }
 
+/* Codec gain/balance. player_open_current() re-applies these on every open so a
+ * codec reset can't leave the amp at 0 dB (repeat-one used to replay the whole
+ * track at full scale); the queue tests only need them to link and to record
+ * that the re-apply happened. */
+static int g_stub_balance;
+static int g_stub_volume = 50;
+
+void hal_balance_set(int balance) { g_stub_balance = balance; }
+int  hal_balance_get(void)        { return g_stub_balance; }
+void hal_volume_set(int vol)      { g_stub_volume = vol; }
+int  hal_volume_get(void)         { return g_stub_volume; }
+
 /* The player registers ring_source() here — a `static` function inside
  * player.c that drains the PCM ring. Capturing it is what lets the test act as
  * the DAC: on the device the DMA-completion ISR pulls from this callback, and
@@ -372,4 +392,32 @@ int ata_standby(void)
 void sleep_ms(uint32_t ms)
 {
     (void)ms;
+}
+
+/*
+ * Disk-error hook. The real diskbuf calls this to ask the source whether a
+ * short read was a genuine end-of-file or a persistent read failure — before
+ * that distinction existed, one bad sector three minutes into a track looked
+ * exactly like the track ending, and the player just advanced. The queue tests
+ * exercise clean end-of-track, so the hook is recorded and never fired.
+ */
+void diskbuf_set_error_hook(diskbuf_t *db, int (*fn)(void *ud), void *ud)
+{
+    (void)db;
+    (void)fn;
+    (void)ud;
+}
+
+/* Arena reset between tracks: the fake decoder allocates nothing. */
+void decoder_arena_reset(decoder_arena_t *a)
+{
+    (void)a;
+}
+
+/* ReplayGain pre-scale. Only applied when a REPLAYGAIN_* tag is present, and
+ * the fake metadata below never supplies one. */
+void flac_set_gain_db_q8(decoder_t *d, int db_q8)
+{
+    (void)d;
+    (void)db_q8;
 }

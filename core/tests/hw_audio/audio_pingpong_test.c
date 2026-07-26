@@ -193,11 +193,25 @@ static int32_t last_kick_first_sample(void)
 /* Bring the driver to a known state: stopped, source re-armed, counters and
  * the mock log cleared, then started. hal_audio_start() is a no-op while the
  * driver is already running, so the stop is what makes this deterministic. */
+/*
+ * A genuinely COLD start.
+ *
+ * hal_audio_stop() no longer discards the primed buffers — that is the whole
+ * point of the pause/resume fix (hal.h promises "the internal buffer is not
+ * cleared ... a subsequent hal_audio_start resumes from where we left off",
+ * and start() used to re-prime both buffers unconditionally, dropping up to a
+ * full buffer of music on every un-pause). Only hal_audio_close() severs the
+ * buffers from the stream. So a test that wants to observe priming has to
+ * close and re-init, not stop and re-start.
+ */
 static void fresh_start(void)
 {
-    hal_audio_stop();
+    hal_audio_close();
+    bus_ready();
+    hal_audio_init(44100u, 2u);
     source_reset();
     bus_ready();
+    hal_audio_set_source(counting_source, 0);
     hal_audio_start();
 }
 
@@ -205,12 +219,26 @@ int main(void)
 {
     xfail_ctx c = { "audio-pingpong", 0, 0, 0 };
 
-    /* --- 1. init is strict about the format it advertises -------------- */
-    bus_ready();
-    xpect(&c, "init rejects 48 kHz",  hal_audio_init(48000u, 2u) != 0);
-    xpect(&c, "init rejects mono",    hal_audio_init(44100u, 1u) != 0);
+    /* --- 1. init accepts the formats it advertises, and only those ------
+     * 44.1 kHz stereo used to be the ONLY accepted format, which meant a
+     * 48 kHz album or a mono podcast failed to open and the player skipped it
+     * with no explanation. The codec now reconfigures its PLL per rate, so the
+     * supported set is a real set — but it is still a set, and a rate the DAC
+     * cannot clock must be refused rather than played at the wrong speed. */
     bus_ready();
     xpect(&c, "init accepts 44.1 kHz stereo", hal_audio_init(44100u, 2u) == 0);
+    bus_ready();
+    xpect(&c, "init accepts 48 kHz stereo",   hal_audio_init(48000u, 2u) == 0);
+    bus_ready();
+    xpect(&c, "init accepts mono",            hal_audio_init(44100u, 1u) == 0);
+    bus_ready();
+    xpect(&c, "init rejects a rate the PLL has no preset for",
+          hal_audio_init(96000u, 2u) != 0);
+    bus_ready();
+    xpect(&c, "init rejects a channel count that is neither mono nor stereo",
+          hal_audio_init(44100u, 6u) != 0);
+    bus_ready();
+    xpect(&c, "init re-accepts 44.1 kHz stereo", hal_audio_init(44100u, 2u) == 0);
 
     /* --- 2. start primes from the source and kicks a real buffer ------- */
     hal_audio_set_source(counting_source, 0);
@@ -284,9 +312,12 @@ int main(void)
     xpect(&c, "no audio repeated or dropped across completions", continuity_ok);
 
     /* --- 4. a short source read zero-pads EXACTLY the tail ------------- */
-    hal_audio_stop();
+    hal_audio_close();                /* cold, so start() really primes       */
+    bus_ready();
+    hal_audio_init(44100u, 2u);
     source_reset();
     bus_ready();
+    hal_audio_set_source(counting_source, 0);
     g_short_after  = 0;               /* short-change the first priming pull */
     g_short_frames = 17;              /* deliberately odd and tiny            */
     hal_audio_start();
@@ -294,18 +325,37 @@ int main(void)
     {
         const int16_t *b = g_call_buf[0];
         int head_ok = 1, tail_ok = 1;
+        /*
+         * The source's frames are NOT left bit-identical any more: an underrun
+         * used to zero-splice mid-waveform, which is an instantaneous jump to
+         * silence — a click, not a graceful dropout. The driver now fades the
+         * last AUDIO_TAIL_RAMP_FRAMES of real audio to zero before padding.
+         * With only 17 frames delivered the ramp covers all of them, so what we
+         * can assert is that each frame is a monotonically shrinking, correctly
+         * signed attenuation of what the source wrote — and that the last one
+         * has reached silence, so the pad it runs into is continuous.
+         */
         for (int f = 0; f < 17; f++) {
-            if (b[2 * f] != sample_for((uint32_t)f) ||
-                b[2 * f + 1] != sample_for((uint32_t)f)) {
-                head_ok = 0;
+            int32_t want = sample_for((uint32_t)f);
+            int32_t got  = b[2 * f];
+            if (b[2 * f + 1] != got) {
+                head_ok = 0;                     /* both channels ramp alike */
             }
+            if (want >= 0 ? (got < 0 || got > want) : (got > 0 || got < want)) {
+                head_ok = 0;                     /* attenuated, never amplified
+                                                  * and never sign-flipped     */
+            }
+        }
+        if (b[2 * 16] != 0 || b[2 * 16 + 1] != 0) {
+            head_ok = 0;                         /* ramp reaches true silence */
         }
         for (int f = 17; f < frames; f++) {
             if (b[2 * f] != 0 || b[2 * f + 1] != 0) {
                 tail_ok = 0;
             }
         }
-        xpect(&c, "short read: the frames the source wrote are intact", head_ok);
+        xpect(&c, "short read: the source's frames are ramped down, not spliced",
+              head_ok);
         xpect(&c, "short read: every frame past the tail is silence", tail_ok);
         xpect(&c, "short read: the chunk length handed to the DMA is unchanged",
               (g_kick_bytes[0] & DMA_CMD_SIZE_MASK) + DMA_SIZE_BIAS ==
@@ -314,14 +364,20 @@ int main(void)
 
     /* A source that reports an error must yield a fully silent buffer, not
      * whatever the previous track left in it. */
-    hal_audio_stop();
+    hal_audio_close();                /* cold, so start() really primes       */
+    bus_ready();
+    hal_audio_init(44100u, 2u);
     source_reset();
     bus_ready();
+    hal_audio_set_source(counting_source, 0);
     g_return_neg = 1;
     hal_audio_start();
     {
         const int16_t *b = g_call_buf[0];
-        int all_zero = 1;
+        int all_zero = (g_calls >= 1);   /* a stop/start pair primes nothing:
+                                          * without a pull there is no buffer
+                                          * to inspect, and reading g_call_buf[0]
+                                          * would be a wild pointer. */
         for (int i = 0; i < frames * 2; i++) {
             if (b[i] != 0) {
                 all_zero = 0;

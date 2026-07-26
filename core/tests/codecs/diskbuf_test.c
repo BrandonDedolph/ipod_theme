@@ -201,8 +201,9 @@ int main(void)
             }
         }
         int filled_high = diskbuf_fill_ahead(&db) >= HIGH;
-        /* Burstiness: the fill must complete in a clustered run of productive
-         * pumps and then stop — not dribble one read out of every call. */
+        /* The burst is what the whole buffer exists for: the fill must take a
+         * bounded run of productive pumps and then STOP, not dribble one read
+         * out of every call forever. */
         int bursty = (burst_reads > 0 && burst_reads < 200);
         /* Once topped out, further pumps must be no-ops (drive idle). */
         long reads_before_idle = cs.n_reads;
@@ -213,9 +214,6 @@ int main(void)
         check("pump-fills-to-high", filled_high);
         check("pump-burst-then-stops", bursty);
         check("pump-idle-when-full", idle_when_full);
-        /* The burst is what the whole buffer exists for: the fill must take a
-         * bounded run of pumps and then STOP, not one read per pump forever. */
-        check("pump-burst-then-stops", burst_reads > 0 && burst_reads < 200);
 
         /* Drain a little (above low): pump must STAY idle — the hysteresis. */
         uint8_t sink[4096];

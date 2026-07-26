@@ -41,6 +41,14 @@ static int mn_utf8_next(const unsigned char **p)
         cp = (cp << 6) | (q[i] & 0x3F);
     }
     *p += n + 1;
+    /* Reject NON-MINIMAL (overlong) encodings and the UTF-16 surrogate range:
+     * "C0 80" would otherwise decode to U+0000 (a NUL smuggled into a name) and
+     * "E0 80 AF" to '/' (a path separator that never appears as a real byte).
+     * The whole sequence is still consumed, so progress is unchanged. */
+    static const int min_cp[3] = { 0x80, 0x800, 0x10000 };
+    if (cp < min_cp[n - 1] || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+        return 0xFFFD;
+    }
     return cp;
 }
 
@@ -55,13 +63,21 @@ static uint32_t name_hash(const char *s)
         else if (cp == 0x201C || cp == 0x201D) cp = '"';
         else if (cp == 0x2013 || cp == 0x2014) cp = '-';
         if (cp >= 'A' && cp <= 'Z') cp += 32;
+        /* Re-encode. The 4-byte branch is load-bearing: without it an astral
+         * codepoint (any emoji) was folded into a 3-byte sequence while
+         * build_index.py emitted real 4-byte UTF-8, so the two hashes could
+         * never agree and the track silently never resolved to its file. */
         unsigned char b[4]; int n;
-        if      (cp < 0x80)  { b[0] = (unsigned char)cp; n = 1; }
-        else if (cp < 0x800) { b[0] = (unsigned char)(0xC0 | (cp >> 6));
-                               b[1] = (unsigned char)(0x80 | (cp & 0x3F)); n = 2; }
-        else                 { b[0] = (unsigned char)(0xE0 | (cp >> 12));
-                               b[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
-                               b[2] = (unsigned char)(0x80 | (cp & 0x3F)); n = 3; }
+        if      (cp < 0x80)   { b[0] = (unsigned char)cp; n = 1; }
+        else if (cp < 0x800)  { b[0] = (unsigned char)(0xC0 | (cp >> 6));
+                                b[1] = (unsigned char)(0x80 | (cp & 0x3F)); n = 2; }
+        else if (cp < 0x10000){ b[0] = (unsigned char)(0xE0 | (cp >> 12));
+                                b[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+                                b[2] = (unsigned char)(0x80 | (cp & 0x3F)); n = 3; }
+        else                  { b[0] = (unsigned char)(0xF0 | (cp >> 18));
+                                b[1] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
+                                b[2] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+                                b[3] = (unsigned char)(0x80 | (cp & 0x3F)); n = 4; }
         for (int i = 0; i < n; i++) { h ^= b[i]; h *= 0x01000193u; }
     }
     return h;

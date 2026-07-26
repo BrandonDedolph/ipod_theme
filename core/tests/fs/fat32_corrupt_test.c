@@ -183,13 +183,8 @@ int main(int argc, char **argv)
         long seen = 0;
         int rc = fat32_readdir_root(&fs, count_forever, &seen);
         xpect(&c, "cyclic: readdir returns instead of hanging", 1);
-        xfail(&c, "cyclic: readdir detects the loop without exhausting the disk",
-              !budget_hit(),
-              "fs/fat32.c fat32_readdir() follows next_cluster() until EOC "
-              "with no visited-cluster bound and no cap on chain length, so a "
-              "directory whose chain loops never terminates on real hardware "
-              "(the device has no watchdog — it simply stops). Only this "
-              "test's read budget ended it");
+        xpect(&c, "cyclic: readdir detects the loop without exhausting the disk",
+              !budget_hit());
         xpect(&c, "cyclic: readdir reports an error rather than silent success",
               rc != 0 || !budget_hit());
         xfail(&c, "cyclic: the same entry is not surfaced over and over",
@@ -208,12 +203,9 @@ int main(int argc, char **argv)
             /* read_file is bounded by maxlen, so it terminates either way —
              * but a looping chain means it returns the SAME cluster's bytes
              * over and over, i.e. silently wrong data. */
-            xfail(&c, "cyclic: reading a looping chain is rejected, not "
+            xpect(&c, "cyclic: reading a looping chain is rejected, not "
                       "silently repeated",
-                  got < 0,
-                  "fs/fat32.c fat32_read_file() has no cluster-revisit check, "
-                  "so a cyclic chain yields the same cluster's bytes on repeat "
-                  "and the caller cannot tell");
+                  got < 0);
         }
     }
 
@@ -234,12 +226,8 @@ int main(int argc, char **argv)
             g_oob_reads = 0;
             int32_t got = fat32_read_file(&fs, clus, big, sizeof big);
             xpect(&c, "oob: reading it returns an error, not data", got < 0);
-            xfail(&c, "oob: the cluster is rejected before any disk read",
-                  g_oob_reads == 0,
-                  "fs/fat32.c never validates a cluster number against "
-                  "fs->total_clus, so an out-of-range first_clus is turned "
-                  "into an LBA and handed to the block device; only the "
-                  "device's own range check caught it");
+            xpect(&c, "oob: the cluster is rejected before any disk read",
+                  g_oob_reads == 0);
         }
     }
     {
@@ -265,14 +253,7 @@ int main(int argc, char **argv)
     }
     {
         int rc = fat32_mount(&fs, img_read, 0, 0);
-        xfail(&c, "fat16: a FAT16 boot sector is rejected", rc != 0,
-              "fs/fat32.c fat32_mount() checks only 'fatsz != 0 && "
-              "num_fats != 0 && rootclus >= 2'. On a real FAT16 BPB those "
-              "offsets are BS_DrvNum/BS_BootSig/BS_VolID (0x29800000-ish) and "
-              "BS_VolLab, which are nonzero — so the volume is accepted and "
-              "walked with the wrong geometry. The FAT32 signature is "
-              "BPB_RootEntCnt == 0 && BPB_FATSz16 == 0 (offsets 17 and 22), "
-              "neither of which is read");
+        xpect(&c, "fat16: a FAT16 boot sector is rejected", rc != 0);
         if (rc == 0) {
             /* It mounted. Everything downstream is then nonsense; make sure it
              * is at least bounded nonsense and not a hang or an OOB read. */
@@ -299,12 +280,8 @@ int main(int argc, char **argv)
               has_name(&col, "HELLO.TXT") && has_name(&col, "Intentions.flac"));
         /* The stale run's checksum binds it to a different short name, so it
          * belongs to no entry here and must be discarded. */
-        xfail(&c, "orphan-lfn: a checksum-mismatched LFN run is discarded",
-              has_name(&col, "REAL.TXT") && !has_name(&col, "Ghost.flac"),
-              "fs/fat32.c lfn_add() ignores the 8.3 checksum in LFN byte 13, "
-              "so a stale long-name run left by an interrupted rename is "
-              "attached to whatever 8.3 entry happens to follow it — the file "
-              "is then listed, and looked up, under the WRONG name");
+        xpect(&c, "orphan-lfn: a checksum-mismatched LFN run is discarded",
+              has_name(&col, "REAL.TXT") && !has_name(&col, "Ghost.flac"));
         /* The trailing run has no 8.3 entry at all: it must produce nothing. */
         xpect(&c, "orphan-lfn: a dangling run with no 8.3 entry surfaces nothing",
               !has_name(&col, "Dangling.flac"));

@@ -731,6 +731,14 @@ int32_t fat32_read_file(fat32_t *fs, uint32_t clus, void *buf, uint32_t maxlen)
     uint32_t total = 0;
     uint32_t guard = fs->max_clus;   /* a chain can't outlast the volume */
 
+    /* A bad FIRST cluster is corruption, not an empty file. Falling out of the
+     * loop below would return 0, which every caller reads as a clean EOF — so a
+     * directory entry pointing outside the data region would surface as a
+     * zero-length track rather than an error. */
+    if (!cluster_valid(fs, clus)) {
+        return FAT32_ECORRUPT;
+    }
+
     while (cluster_valid(fs, clus) && total < maxlen) {
         if (guard-- == 0) {
             return FAT32_ECORRUPT;   /* cyclic chain */

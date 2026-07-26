@@ -6,8 +6,11 @@
  * mmio_mock_* control surface from mmio_mock.h.
  *
  * Deliberately simple and allocation-free: fixed-capacity arrays sized
- * well past any single driver call. If a driver ever overruns them the
- * test aborts loudly rather than silently truncating the trace.
+ * well past any single driver call. Overrunning the read-map still aborts
+ * loudly (it means a test is mis-programmed), but overrunning the EVENT log
+ * saturates and counts the excess via mmio_mock_dropped() — a driver spinning
+ * to its bounded limit on a deliberately wedged bus is legitimate behaviour,
+ * and killing the binary there would destroy every result already produced.
  */
 
 #include "mmio_mock.h"
@@ -23,6 +26,7 @@
 
 static mmio_event g_log[MMIO_LOG_CAP];
 static size_t     g_log_len;
+static size_t     g_log_dropped;
 
 typedef struct {
     uint32_t addr;
@@ -45,6 +49,7 @@ void mmio_mock_set_hook(mmio_mock_hook_fn fn)
 void mmio_mock_reset(void)
 {
     g_log_len = 0;
+    g_log_dropped = 0;
     g_hook    = NULL;
     for (size_t i = 0; i < MMIO_READMAP_CAP; i++) {
         g_reads[i].in_use = 0;
@@ -104,12 +109,48 @@ void mmio_mock_queue_read(uint32_t addr, const uint32_t *seq, size_t n)
     e->consumed = 0;
 }
 
+/*
+ * IRAM is memory, not a peripheral.
+ *
+ * This mock models the PERIPHERAL bus: the log is a register grammar, and every
+ * trace test asserts an exact ordered sequence over it. power_standby() clears
+ * ~112 KB of IRAM before sleeping (so Apple's OF doesn't take the boot-from-
+ * sleep path on wake) and it does that through mmio_write32, because a raw
+ * store to 0x4000C000 is a wild pointer on the host. Those 16k stores are not
+ * register accesses and must not appear in a grammar — left in, they exhaust
+ * the log and bury the two I2C writes the test exists to check.
+ *
+ * Stores here are accepted and discarded; reads fall through to the normal
+ * programmed-read path, so nothing else changes.
+ */
+#define IRAM_LO 0x40000000u
+#define IRAM_HI 0x40020000u
+
+static int is_ram(uint32_t addr)
+{
+    return addr >= IRAM_LO && addr < IRAM_HI;
+}
+
 static void record(mmio_op op, int width, uint32_t addr, uint32_t value)
 {
+    if (op == MMIO_OP_WRITE && is_ram(addr)) {
+        return;
+    }
+    /*
+     * Saturate, don't abort.
+     *
+     * A driver that spins to its bounded limit on a deliberately wedged bus
+     * emits far more polling reads than any grammar cares about — power_standby
+     * against a permanently-BUSY controller does I2C_BUSY_SPIN_LIMIT (65536)
+     * reads per attempt, which fills this log on its own. Aborting there kills
+     * the whole test binary and destroys every result it had already produced,
+     * turning "the driver spun a lot, exactly as designed" into a dead suite.
+     * Record what fits, count the rest, and let trace_expect_end() decide
+     * whether truncation actually invalidates what it was checking.
+     */
     if (g_log_len >= MMIO_LOG_CAP) {
-        fprintf(stderr, "mmio_mock: event-log capacity (%d) exhausted\n",
-                MMIO_LOG_CAP);
-        abort();
+        g_log_dropped++;
+        return;
     }
     g_log[g_log_len].op    = op;
     g_log[g_log_len].width = width;
@@ -189,4 +230,11 @@ size_t mmio_mock_count(mmio_op op, uint32_t addr)
         }
     }
     return c;
+}
+
+/* Events discarded after the log filled (see record()). Nonzero means the
+ * recorded grammar is a prefix of what actually happened. */
+size_t mmio_mock_dropped(void)
+{
+    return g_log_dropped;
 }

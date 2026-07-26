@@ -65,15 +65,18 @@ static void power_delay_us(uint32_t us)
 #define PMU_IRAM_KEEP_LO     0x40014000u    /* skip [KEEP_LO, KEEP_HI): live stacks */
 #define PMU_IRAM_KEEP_HI     0x40018000u
 
+/* Written through mmio_write32 rather than a raw volatile pointer: it is the
+ * convention every other device access in this tree follows, and it is what
+ * lets the host build run this function at all — a direct store to 0x4000C000
+ * on the host is a wild pointer, which is exactly how it first showed up (a
+ * SIGSEGV in the standby trace test). */
 static void power_clear_iram(void)
 {
-    for (volatile uint32_t *p = (volatile uint32_t *)PMU_IRAM_CLEAR_BASE;
-         p < (volatile uint32_t *)PMU_IRAM_KEEP_LO; p++) {
-        *p = 0;
+    for (uint32_t a = PMU_IRAM_CLEAR_BASE; a < PMU_IRAM_KEEP_LO; a += 4u) {
+        mmio_write32(a, 0);
     }
-    for (volatile uint32_t *p = (volatile uint32_t *)PMU_IRAM_KEEP_HI;
-         p < (volatile uint32_t *)PMU_IRAM_CLEAR_END; p++) {
-        *p = 0;
+    for (uint32_t a = PMU_IRAM_KEEP_HI; a < PMU_IRAM_CLEAR_END; a += 4u) {
+        mmio_write32(a, 0);
     }
 }
 

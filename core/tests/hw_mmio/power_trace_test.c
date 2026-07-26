@@ -283,3 +283,13 @@ int main(void)
 
     return xfail_done(&c);
 }
+
+/*
+ * power_standby() relights the backlight when it gives up on a wedged bus,
+ * rather than leaving the user with a dark unresponsive device. No panel here.
+ */
+void backlight_set(int level);
+void backlight_set(int level)
+{
+    (void)level;
+}
