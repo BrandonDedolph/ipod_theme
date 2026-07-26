@@ -31,13 +31,12 @@ typedef struct text_font text_font_t;
 #define UI_GLYPH_MIDDOT "\x03"   /* · middle dot                */
 
 /* The built-in Nunito faces, backed by the atlas data. One getter
- * per shipped atlas header (regular 9/11/13; bold 9/11/13/17 — there is
- * no regular-17 atlas in the tree). Each returns a stable pointer to a
- * .rodata-resident handle; never NULL. */
+ * per shipped atlas header (regular 9/11/13; bold 11/13/17 — there is
+ * no regular-17 atlas in the tree, and bold-9 was dropped as unused).
+ * Each returns a stable pointer to a .rodata-resident handle; never NULL. */
 const text_font_t *text_font_regular_9(void);
 const text_font_t *text_font_regular_11(void);
 const text_font_t *text_font_regular_13(void);
-const text_font_t *text_font_bold_9(void);
 const text_font_t *text_font_bold_11(void);
 const text_font_t *text_font_bold_13(void);
 const text_font_t *text_font_bold_17(void);

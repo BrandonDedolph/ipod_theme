@@ -17,17 +17,15 @@
 #include "text.h"
 
 /* atlas_glyph_t / atlas_t and the generated atlas handles. The generated
- * headers each pull in ../atlas.h (which only needs stdint + hal.h — both
- * freestanding-safe), then define their static coverage data + a
- * const atlas_t. This TU is the sole definition site for those atlas_t
- * symbols in both the hw link (atlas.c is sim-only) and the host text_test
- * link (which links text.c but not atlas.c), so there is no clash. */
+ * headers each pull in ../atlas.h (which needs only stdint — freestanding-
+ * safe), then define their static coverage data + a const atlas_t. This TU
+ * is the sole definition site for those atlas_t symbols, so there is no
+ * clash between the hw link and the host text_test link. */
 #include "atlas.h"
 #include "atlas/glyphmap.h"        /* ATLAS_CPMAP[]: codepoint -> glyph index */
 #include "atlas/nunito_regular_9.h"
 #include "atlas/nunito_regular_11.h"
 #include "atlas/nunito_regular_13.h"
-#include "atlas/nunito_bold_9.h"
 #include "atlas/nunito_bold_11.h"
 #include "atlas/nunito_bold_13.h"
 #include "atlas/nunito_bold_17.h"
@@ -41,7 +39,6 @@ struct text_font {
 static const struct text_font FONT_REGULAR_9  = { &NUNITO_REGULAR_9  };
 static const struct text_font FONT_REGULAR_11 = { &NUNITO_REGULAR_11 };
 static const struct text_font FONT_REGULAR_13 = { &NUNITO_REGULAR_13 };
-static const struct text_font FONT_BOLD_9     = { &NUNITO_BOLD_9     };
 static const struct text_font FONT_BOLD_11    = { &NUNITO_BOLD_11    };
 static const struct text_font FONT_BOLD_13    = { &NUNITO_BOLD_13    };
 static const struct text_font FONT_BOLD_17    = { &NUNITO_BOLD_17    };
@@ -49,7 +46,6 @@ static const struct text_font FONT_BOLD_17    = { &NUNITO_BOLD_17    };
 const text_font_t *text_font_regular_9(void)  { return &FONT_REGULAR_9;  }
 const text_font_t *text_font_regular_11(void) { return &FONT_REGULAR_11; }
 const text_font_t *text_font_regular_13(void) { return &FONT_REGULAR_13; }
-const text_font_t *text_font_bold_9(void)     { return &FONT_BOLD_9;     }
 const text_font_t *text_font_bold_11(void)    { return &FONT_BOLD_11;    }
 const text_font_t *text_font_bold_13(void)    { return &FONT_BOLD_13;    }
 const text_font_t *text_font_bold_17(void)    { return &FONT_BOLD_17;    }
