@@ -6,11 +6,15 @@
  * supplied block-read callback that reads 512-byte sectors, so the same
  * code host-tests against a synthetic image and drives ATA on device.
  * Scope is exactly what "play a file off the disk" needs: mount, find a
- * file in the root directory by name, read its bytes, and enumerate any
- * directory (root or a subdirectory by cluster) so a browser can descend.
- * No writes. Lookup matches the VFAT long name (reassembled from the
- * 0x0F LFN entries, ASCII, case-insensitive, up to a fixed cap) and falls
- * back to the classic 8.3 short name.
+ * file by name in any directory (the root by default), read its bytes, and
+ * enumerate any directory (root or a subdirectory by cluster) so a browser
+ * can descend. No writes. Lookup matches the VFAT long name (reassembled
+ * from the 0x0F LFN entries and validated against the 8.3 checksum that
+ * binds them, ASCII, case-insensitive, up to a fixed cap) and falls back to
+ * the classic 8.3 short name.
+ *
+ * Only FAT32 is accepted: a FAT12/16 BPB is rejected at mount rather than
+ * mis-parsed (its offsets 36/44 hold entirely different fields).
  *
  * The volume's logical sector size (BytesPerSector, e.g. 2048 on the
  * stock iPod 80 GB) is taken from the BPB and translated to the 512-byte
@@ -39,9 +43,26 @@ typedef struct {
     uint32_t    fat_start;     /* FS sector of the FAT region (rel. part) */
     uint32_t    data_start;    /* FS sector of the data region (rel.part) */
     uint32_t    clus_bytes;    /* bytes per cluster                       */
-    uint32_t    total_clus;    /* total data clusters (for capacity)      */
+    uint32_t    total_clus;    /* total data clusters (for capacity), 0 if
+                                * the BPB size fields were absent          */
+    uint32_t    max_clus;      /* EXCLUSIVE cluster-number ceiling: every
+                                * chain step is validated against it and
+                                * every chain walk is bounded by it. Derived
+                                * at mount from total_clus AND from what the
+                                * FAT can address, whichever is tighter (see
+                                * fat32.c) — so it is a real bound even on a
+                                * volume whose TotSec fields are missing.   */
     uint32_t    free_clus;     /* free clusters from FSInfo, or 0xFFFFFFFF */
 } fat32_t;
+
+/*
+ * Return codes. 0 is success everywhere; the negative values are shared by
+ * the lookup/enumeration calls so a caller can tell "no such file" from "the
+ * disk is failing" from "this filesystem is corrupt".
+ */
+#define FAT32_ENOENT   (-1)   /* no such entry                              */
+#define FAT32_EIO      (-2)   /* the block callback reported a read error   */
+#define FAT32_ECORRUPT (-3)   /* cluster chain is cyclic / impossibly long  */
 
 /*
  * Mount the FAT32 volume whose first sector is at 512-byte LBA
@@ -50,26 +71,49 @@ typedef struct {
  */
 int fat32_mount(fat32_t *fs, fat_read_fn read, void *ud, uint32_t part_lba);
 
+/* One directory entry surfaced by enumeration. */
+typedef struct {
+    char     name[256];      /* NUL-terminated. VFAT long name if present (and
+                              * checksum-bound to this entry), else the 8.3
+                              * name formatted "NAME.EXT". UTF-8.            */
+    char     short_name[13]; /* the raw 8.3 name, always, same formatting —
+                              * what a lookup by mangled short name matches  */
+    uint32_t first_clus;     /* first cluster of the file/dir */
+    uint32_t size;           /* file size in bytes; 0 for directories */
+    uint8_t  is_dir;         /* 1 if subdirectory, else 0 */
+} fat32_dirent_t;
+
 /*
- * Find `name` (case-insensitive ASCII) in the root directory. Matches either
- * the file's VFAT long name (e.g. "Intentions.flac", whose 4-char extension
- * won't fit 8.3) or its 8.3 short name (e.g. "TEST.WAV"). On success returns
- * 0 and sets *first_clus and *size (bytes). Returns -1 if not found, negative
- * on a read error.
+ * Callback invoked once per real entry. Return 0 to continue, nonzero to stop
+ * early. `ent` is owned by the enumerator and only valid for the duration of
+ * the call — copy anything you need to keep. The callback MAY read from the
+ * filesystem (open/read/enumerate); the directory sector being parsed is a
+ * private copy, so that no longer corrupts the enumeration in progress.
+ */
+typedef int (*fat32_dir_cb)(void *ud, const fat32_dirent_t *ent);
+
+/*
+ * Find `name` (case-insensitive ASCII) in the directory whose first cluster
+ * is `dir_clus`. Matches either the entry's VFAT long name (e.g.
+ * "Intentions.flac", whose 4-char extension won't fit 8.3) or its raw 8.3
+ * short name (e.g. "TEST.WAV", "INTENT~1.FLA"). On success returns 0 and sets
+ * *first_clus and *size (bytes). Returns FAT32_ENOENT if not found, FAT32_EIO
+ * on a read error, FAT32_ECORRUPT on a cyclic directory chain.
+ *
+ * Implemented as a matching callback over fat32_readdir, so lookup and
+ * enumeration cannot drift apart. Subdirectories match too (size 0).
+ */
+int fat32_open_in(fat32_t *fs, uint32_t dir_clus, const char *name,
+                  uint32_t *first_clus, uint32_t *size);
+
+/*
+ * fat32_open_in with the ROOT directory as the (documented) default — the
+ * common case, and the shape every existing caller uses. There is no path
+ * parsing: to reach a file inside a folder, enumerate/open the folder first
+ * and pass its cluster to fat32_open_in.
  */
 int fat32_open(fat32_t *fs, const char *name,
                uint32_t *first_clus, uint32_t *size);
-
-/* One directory entry surfaced by enumeration. */
-typedef struct {
-    char     name[256];   /* NUL-terminated. VFAT long name if present, else 8.3 (e.g. "TEST.FLA"). */
-    uint32_t first_clus;  /* first cluster of the file/dir */
-    uint32_t size;        /* file size in bytes; 0 for directories */
-    uint8_t  is_dir;      /* 1 if subdirectory, else 0 */
-} fat32_dirent_t;
-
-/* Callback invoked once per real entry. Return 0 to continue, nonzero to stop early. */
-typedef int (*fat32_dir_cb)(void *ud, const fat32_dirent_t *ent);
 
 /*
  * Enumerate the directory whose first cluster is `dir_clus`, invoking
