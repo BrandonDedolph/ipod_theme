@@ -14,8 +14,82 @@
 
 #include <stdint.h>
 
-/* 320*240 RGB565 = 153,600 bytes, lives in .bss. */
-static uint16_t g_fb[LCD_WIDTH * LCD_HEIGHT];
+/* 320*240 RGB565 = 153,600 bytes, lives in .bss. 4-byte aligned so the fill
+ * paths can write PAIRS of pixels as one 32-bit store (see fill_words). */
+static uint16_t g_fb[LCD_WIDTH * LCD_HEIGHT] __attribute__((aligned(4)));
+
+/* ---------------------------------------------------------------------------
+ * Damage rect: the union of everything drawn since the last reset, as the
+ * half-open box [x0,x1) x [y0,y1). Empty when x0 >= x1. See console.h.
+ * ------------------------------------------------------------------------- */
+static int g_dmg_x0 = LCD_WIDTH, g_dmg_y0 = LCD_HEIGHT, g_dmg_x1, g_dmg_y1;
+
+/* Union an ALREADY-CLAMPED box into the damage rect. */
+static void damage_box(int x0, int y0, int x1, int y1)
+{
+    if (x1 <= x0 || y1 <= y0) {
+        return;
+    }
+    if (x0 < g_dmg_x0) g_dmg_x0 = x0;
+    if (y0 < g_dmg_y0) g_dmg_y0 = y0;
+    if (x1 > g_dmg_x1) g_dmg_x1 = x1;
+    if (y1 > g_dmg_y1) g_dmg_y1 = y1;
+}
+
+void console_damage_reset(void)
+{
+    g_dmg_x0 = LCD_WIDTH;
+    g_dmg_y0 = LCD_HEIGHT;
+    g_dmg_x1 = 0;
+    g_dmg_y1 = 0;
+}
+
+void console_damage_add(int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int x1 = x + w, y1 = y + h;
+    if (x1 > LCD_WIDTH)  x1 = LCD_WIDTH;
+    if (y1 > LCD_HEIGHT) y1 = LCD_HEIGHT;
+    damage_box(x0, y0, x1, y1);
+}
+
+int console_damage_get(int *x, int *y, int *w, int *h)
+{
+    if (g_dmg_x1 <= g_dmg_x0 || g_dmg_y1 <= g_dmg_y0) {
+        return 0;
+    }
+    if (x) *x = g_dmg_x0;
+    if (y) *y = g_dmg_y0;
+    if (w) *w = g_dmg_x1 - g_dmg_x0;
+    if (h) *h = g_dmg_y1 - g_dmg_y0;
+    return 1;
+}
+
+/* Fill `n` pixels at `dst` with `rgb565`, writing 32-bit word pairs over the
+ * aligned run (the panel bus + the CPU both prefer words; lcd_fill already does
+ * this on its side). Handles an odd leading/trailing pixel. */
+static void fill_words(uint16_t *dst, int n, uint16_t rgb565)
+{
+    if (n <= 0) {
+        return;
+    }
+    if (((uintptr_t)dst & 2u) != 0) {          /* odd start: one 16-bit store */
+        *dst++ = rgb565;
+        n--;
+    }
+    uint32_t  pair = ((uint32_t)rgb565 << 16) | rgb565;
+    uint32_t *w    = (uint32_t *)(void *)dst;
+    int       nw   = n >> 1;
+    for (int i = 0; i < nw; i++) {
+        w[i] = pair;
+    }
+    if (n & 1) {                                /* odd tail */
+        dst[n - 1] = rgb565;
+    }
+}
 
 #define GLYPH_W 8
 #define GLYPH_H 8
@@ -107,10 +181,8 @@ const uint16_t *console_framebuffer(void)
 
 void console_clear(uint16_t rgb565)
 {
-    int i;
-    for (i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++) {
-        g_fb[i] = rgb565;
-    }
+    fill_words(g_fb, LCD_WIDTH * LCD_HEIGHT, rgb565);
+    damage_box(0, 0, LCD_WIDTH, LCD_HEIGHT);   /* a clear damages everything */
 }
 
 uint16_t *console_fb(void)
@@ -130,11 +202,9 @@ void console_fill_rect(int x, int y, int w, int h, uint16_t rgb565)
     if (x1 > LCD_WIDTH)  x1 = LCD_WIDTH;
     if (y1 > LCD_HEIGHT) y1 = LCD_HEIGHT;
     for (int py = y0; py < y1; py++) {
-        uint16_t *row = &g_fb[py * LCD_WIDTH];
-        for (int px = x0; px < x1; px++) {
-            row[px] = rgb565;
-        }
+        fill_words(&g_fb[py * LCD_WIDTH + x0], x1 - x0, rgb565);
     }
+    damage_box(x0, y0, x1, y1);
 }
 
 void console_blit565(int x, int y, int w, int h, const uint16_t *src)
@@ -153,6 +223,7 @@ void console_blit565(int x, int y, int w, int h, const uint16_t *src)
             drow[px] = srow[px - x];
         }
     }
+    damage_box(x0, y0, x1, y1);
 }
 
 void console_char(int col, int row, char ch, uint16_t fg, uint16_t bg)
@@ -175,6 +246,7 @@ void console_char(int col, int row, char ch, uint16_t fg, uint16_t bg)
             g_fb[(base_y + ry) * LCD_WIDTH + (base_x + cx)] = set ? fg : bg;
         }
     }
+    damage_box(base_x, base_y, base_x + GLYPH_W, base_y + GLYPH_H);
 }
 
 void console_str(int col, int row, const char *s, uint16_t fg, uint16_t bg)
