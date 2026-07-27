@@ -166,6 +166,12 @@
 #define CPU_HI_INT_STAT_ADDR  0x60004100
 #define CPU_HI_INT_DIS_ADDR   0x60004128
 
+/* The COP's own mask register. We park the COP at boot (crt0.S) and never
+ * wake it, so nothing here needs it during normal running — it exists for
+ * power_reboot(), which masks BOTH cores' interrupts before pulling the
+ * system reset, so neither core can take an IRQ into a half-reset machine. */
+#define COP_INT_DIS_ADDR      0x60004038
+
 #define TIMER1_IRQ          0             /* low bank, 1<<0 (01-soc, IRQ #) */
 #define TIMER2_IRQ          1             /* low bank, 1<<1 */
 
@@ -216,6 +222,15 @@
 
 #define DEV_SER0            0x00000040  /* bit 6 in DEV_EN / DEV_RS */
 #define DEV_SER1            0x00000080  /* bit 7 */
+
+/* Whole-system reset. Setting this bit in DEV_RS reboots the SoC — the one
+ * bit here that is NOT a per-peripheral gate. Used only by power_reboot()
+ * (hal/hw/power.c), which is how we hand control back to the Apple boot ROM
+ * (e.g. to enter ROM disk mode). Bit value verified against Rockbox
+ * pp5020.h:154 DEV_SYSTEM and its PP502x system_reboot(), which for iPod
+ * targets is exactly `DEV_RS |= DEV_SYSTEM` after masking both cores'
+ * interrupts (2026-07-26). Our DEV_RS address already matches theirs. */
+#define DEV_SYSTEM          0x00000004  /* bit 2: system reset */
 #define DEV_INIT1_ADDR      0x70000010
 #define DEV_INIT2_ADDR      0x70000020
 

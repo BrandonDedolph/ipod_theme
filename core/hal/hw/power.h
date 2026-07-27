@@ -31,4 +31,27 @@
  */
 int power_standby(void);
 
+/*
+ * Reboot the SoC. Masks both cores' interrupts, then sets DEV_SYSTEM in
+ * DEV_RS and spins — control returns to the Apple boot ROM. Never returns.
+ *
+ * (docs/hw/01-soc-pp5022.md, "Power management"; bit verified against
+ * Rockbox pp5020.h DEV_SYSTEM + its PP502x system_reboot.)
+ */
+_Noreturn void power_reboot(void);
+
+/*
+ * Reboot into the Apple boot ROM's DISK MODE (USB mass storage).
+ *
+ * Writes the ROM's magic token to the known IRAM location and reboots; the
+ * ROM recognises it and comes up in disk mode instead of loading the OS
+ * image (docs/hw/08-boot-dock.md, "Disk Mode (Apple's fallback)").
+ *
+ * This is how the user gets the device onto a host to be flashed or to have
+ * music copied on. Our firmware implements no USB at all, so without this
+ * the ONLY route in is the ROM's Select+Play key combo at boot — which is
+ * timing-sensitive and easy to miss. Never returns.
+ */
+_Noreturn void power_enter_disk_mode(void);
+
 #endif /* CORE_HAL_HW_POWER_H */

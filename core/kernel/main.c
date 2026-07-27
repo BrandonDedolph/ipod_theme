@@ -2907,13 +2907,14 @@ typedef struct { const char *label; uint8_t active; } menu_item_t;
 /* Main menu. ACTIVE: Music, Now Playing (Now Playing greyed until something is
  * playing — its `active` flag is refreshed from the player before each paint). */
 enum { MM_MUSIC, MM_PLAYLISTS, MM_PODCASTS, MM_AUDIOBOOKS, MM_SETTINGS,
-       MM_NOWPLAYING, MM_COUNT };
+       MM_DISKMODE, MM_NOWPLAYING, MM_COUNT };
 static menu_item_t g_main_menu[MM_COUNT] = {
     { "Music",       1 },
     { "Playlists",   0 },
     { "Podcasts",    0 },
     { "Audiobooks",  0 },
     { "Settings",    1 },
+    { "Disk Mode",   1 },
     { "Now Playing", 1 },
 };
 static int g_main_sel;
@@ -4016,6 +4017,23 @@ _Noreturn static void run_ui(fat32_t *fs)
                     } else if (g_main_sel == MM_NOWPLAYING && player_active()) {
                         scr_push(SCR_NOWPLAYING);
                         np_first = 1;
+                    } else if (g_main_sel == MM_DISKMODE) {
+                        /* Reboot into the ROM's USB mass-storage mode. We
+                         * implement no USB ourselves, so this is the only way
+                         * to get the device onto a host from inside our own
+                         * firmware — otherwise the user has to catch the ROM's
+                         * Select+Play window at boot, which is timing-
+                         * sensitive and easy to miss. Stop playback and blank
+                         * the panel first so we don't reset mid-DMA or leave a
+                         * half-drawn screen; power_enter_disk_mode never
+                         * returns. */
+                        player_stop();
+                        hal_audio_close();
+                        console_clear(LINEN_SURFACE);
+                        ui_text_centered(LCD_HEIGHT / 2 - 8, "Disk Mode",
+                                         FONT_TITLE, LINEN_INK);
+                        lcd_present_fb(console_fb());
+                        power_enter_disk_mode();
                     } else if (g_main_sel == MM_SETTINGS) {
                         g_set_screen = SETTINGS_ROOT;
                         g_set_sel = g_set_root_sel = g_set_accum = 0;

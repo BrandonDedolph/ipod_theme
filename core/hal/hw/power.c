@@ -119,3 +119,57 @@ int power_standby(void)
     backlight_set(BACKLIGHT_MAX);
     return -1;
 }
+
+/* ---------- Reboot / disk mode ---------------------------------------
+ * docs/hw/01-soc-pp5022.md ("Power management") for DEV_RS, and
+ * docs/hw/08-boot-dock.md ("Disk Mode (Apple's fallback)") for the token.
+ */
+
+/*
+ * The Apple boot ROM's disk-mode token and where it looks for it. The ROM
+ * checks this IRAM location early on reset; finding the token, it enters
+ * USB mass-storage mode instead of loading the OS image. 21 bytes, embedded
+ * NULs and all — it is a byte pattern, not a C string, so it is written as
+ * an explicit array rather than via a string literal that would stop at the
+ * first NUL (08-boot-dock.md, "From the bootloader").
+ */
+#define DISKMODE_MAGIC_ADDR 0x4001FF00u
+
+static const uint8_t diskmode_magic[21] = {
+    'd','i','s','k','m','o','d','e', 0, 0,
+    'h','o','t','s','t','u','f','f', 0, 0, 1
+};
+
+_Noreturn void power_reboot(void)
+{
+    /*
+     * Mask both cores before pulling the reset. An IRQ taken while the
+     * machine is half-way through a system reset has nowhere sane to go,
+     * and on this device a wedge here is indistinguishable from a brick.
+     * The COP is parked at boot and never woken, but mask it anyway: this
+     * function must not depend on that staying true.
+     *
+     * Masking at the INTERRUPT CONTROLLER rather than via the CPSR I-bit is
+     * deliberate: it disables every source outright, it is what actually
+     * matters across the reset, and it keeps this file free of the ARM
+     * inline asm in kernel/irq.h — which would not compile in the host build
+     * that runs this driver against the mock bus.
+     */
+    mmio_write32(CPU_INT_DIS_ADDR, 0xFFFFFFFFu);
+    mmio_write32(COP_INT_DIS_ADDR, 0xFFFFFFFFu);
+
+    mmio_write32(DEV_RS_ADDR, mmio_read32(DEV_RS_ADDR) | DEV_SYSTEM);
+
+    for (;;) {
+        /* The reset lands within microseconds; spin so we never run on into
+         * an inconsistent machine if it is somehow delayed. */
+    }
+}
+
+_Noreturn void power_enter_disk_mode(void)
+{
+    for (unsigned i = 0; i < sizeof diskmode_magic; i++) {
+        mmio_write8(DISKMODE_MAGIC_ADDR + i, diskmode_magic[i]);
+    }
+    power_reboot();
+}
