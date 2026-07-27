@@ -93,4 +93,77 @@ int lcd_is_slept(void);
  */
 uint32_t lcd_bcm_timeouts(void);
 
+/* ---- BCM bootstrap / recovery ---------------------------------------------
+ *
+ * NOT ON THE BOOT PATH. lcd_init() does not call bcm_init(): boot relies
+ * entirely on the chainload handoff having left the BCM powered, bootstrapped
+ * and idle, exactly as it always has. These exist for the case that handoff
+ * cannot help with — a BCM that wedges at runtime, which today is
+ * unrecoverable without a reboot, on a device whose only debug channel is the
+ * screen the BCM drives.
+ */
+
+/* bcm_init() result codes. Negative values name the step that failed, so a
+ * future debug screen can say WHERE the bootstrap died without a serial
+ * cable. */
+#define LCD_BCM_OK                 0
+#define LCD_BCM_ERR_NO_BLOB      (-1)  /* no `vmcs` tag in the flash directory */
+#define LCD_BCM_ERR_BAD_BLOB     (-2)  /* tag found, offset/length implausible */
+#define LCD_BCM_ERR_ALT_BUSY     (-3)  /* stage 2: alt-control never went idle */
+#define LCD_BCM_ERR_ALT_READY    (-4)  /* stage 2: alt-control never went ready*/
+#define LCD_BCM_ERR_PORTS        (-5)  /* read ports never came ready          */
+#define LCD_BCM_ERR_UPLOAD_BUSY  (-6)  /* stage 3 gate: never went idle        */
+#define LCD_BCM_ERR_UPLOAD_READY (-7)  /* stage 3 gate: never went ready       */
+#define LCD_BCM_ERR_SDRAM        (-8)  /* SDRAM mapping never completed        */
+#define LCD_BCM_ERR_START        (-9)  /* firmware never started               */
+#define LCD_BCM_ERR_BUSY        (-10)  /* lcd_recover() re-entered             */
+
+/*
+ * Full BCM bootstrap: power-cycle the coprocessor, run the strap + handshake
+ * sequence, upload the `vmcs` firmware blob out of flash ROM, and start it
+ * (core/docs/hw/02-lcd.md, "Bootstrap and firmware upload").
+ *
+ * Returns LCD_BCM_OK, or one of the codes above. The blob is located and
+ * validated BEFORE any hardware is touched, and a blob that fails validation
+ * is reported rather than uploaded — starting the BCM's processor on garbage
+ * is worse than leaving it wedged.
+ *
+ * On success the BCM is running but its SDRAM framebuffer is undefined (the
+ * power cycle discarded it) and the panel is mid-init: the caller must present
+ * a frame, and that first frame can take the documented ~500 ms. Most callers
+ * want lcd_recover() instead, which does all of that.
+ *
+ * UNVERIFIED ON SILICON — see the notes in lcd.c. Nothing in this sequence has
+ * ever run on a real device; the chainloader has always done it for us.
+ */
+int bcm_init(void);
+
+/*
+ * Recover a wedged BCM: re-run the host-side port init, bcm_init(), and
+ * re-establish framebuffer/panel state (one known full frame — lcd.c holds no
+ * back buffer, so the caller must repaint afterwards). Returns LCD_BCM_OK or
+ * the bcm_init() failure code; re-entrant calls return LCD_BCM_ERR_BUSY.
+ *
+ * This is the function a future caller uses when the BCM has wedged. It is
+ * wired into exactly ONE place inside lcd.c — the post-wake absorb path, as a
+ * last resort when the first commit after lcd_wake() exhausts its wall-clock
+ * budget, i.e. precisely the case that currently latches the panel white until
+ * a reboot — and that wiring is compiled out unless LCD_RECOVER_ON_WAKE is
+ * defined to 1. It defaults to 0, so the shipping image behaves exactly as it
+ * did before this existed.
+ *
+ * ENABLING IT IS A DEVICE-RISK CHANGE: it power-cycles the BCM on a sequence
+ * no one has ever executed on this hardware. Turn it on only with a known-good
+ * rollback image available.
+ */
+int lcd_recover(void);
+
+/*
+ * How many times lcd_recover() has been ENTERED since boot (attempts, not
+ * successes — a recovery that ran and failed is the most interesting case).
+ * Zero means the recovery path has never fired, which is what a healthy device
+ * should report forever.
+ */
+uint32_t lcd_bcm_recoveries(void);
+
 #endif /* CORE_HAL_HW_LCD_H */

@@ -7,13 +7,15 @@
  * "Memory-mapped BCM interface", "LCD update protocol"), verified
  * against Rockbox lcd-video.c / ipodloader2 fb.c (2026-06-11).
  *
- * No BCM bootstrap here. Boot relies on the Apple flash ROM having
- * powered the BCM and uploaded its firmware before any loader runs
- * (02-lcd.md, "Chainload handoff state") — that part holds whether we
- * are chainloaded or dispatched straight out of the firmware partition
- * as OSOS. What does NOT survive dropping ipodloader2 is its extra
- * guarantee that the BCM is handed over IDLE, so the first frame no
- * longer assumes that; see lcd_first_frame.
+ * The BCM bootstrap is at the END of this file and is NOT on the boot
+ * path. Boot relies on the Apple flash ROM having powered the BCM and
+ * uploaded its firmware before any loader runs (02-lcd.md, "Chainload
+ * handoff state") — that part holds whether we are chainloaded or
+ * dispatched straight out of the firmware partition as OSOS. What does
+ * NOT survive dropping ipodloader2 is its extra guarantee that the BCM
+ * is handed over IDLE, so the first frame no longer assumes that; see
+ * lcd_first_frame. bcm_init()/lcd_recover() exist for the case the
+ * handoff cannot help with — a BCM that wedges at runtime.
  *
  * For frames we use the Rockbox-BOOTLOADER update variant: point the
  * write port at the framebuffer, stream params/data, THEN wait for the
@@ -198,6 +200,28 @@ static int lcd_slept;
 /* Set by lcd_wake: the next commit must absorb the long panel-init update. */
 static int lcd_post_wake;
 
+/*
+ * BCM re-bootstrap on a failed post-wake absorb — OFF by default.
+ *
+ * lcd_recover() is a real recovery path but an UNVERIFIED one: no part of the
+ * bootstrap it runs has ever executed on silicon (the chainloader has always
+ * done it for us), it power-cycles the BCM on the way in, and if it is wrong
+ * the panel does not come back — on a device whose only debug channel is that
+ * panel. So the shipping image keeps today's behaviour exactly: the post-wake
+ * commit absorbs, gives up, and reports. Set this to 1 only on a device with a
+ * known-good rollback image to hand (see lcd_recover's header comment).
+ */
+#ifndef LCD_RECOVER_ON_WAKE
+#define LCD_RECOVER_ON_WAKE 0
+#endif
+
+/* Re-entrancy guard: lcd_recover() ends by presenting a frame, which lands
+ * back in bcm_frame_commit — which is one of lcd_recover's callers. */
+static int lcd_in_recover;
+
+/* How many times lcd_recover() has been entered (see lcd_bcm_recoveries). */
+static uint32_t lcd_recoveries;
+
 /* Set the BCM-internal write destination: 32-bit address store to the
  * write-address port, then poll write-ready (02-lcd.md, write
  * handshake; verified against Rockbox lcd-video.c, 2026-06-11). */
@@ -247,8 +271,8 @@ static uint32_t bcm_read32(uint32_t addr)
  * BCM interrupt pin as a GPIO input, bit 7 released to its alternate
  * function, GPO32 bit 0 released.
  *
- * Factored out of lcd_init() verbatim so a BCM bootstrap can re-run it
- * before bringup — the doc is explicit that this half "always runs",
+ * Factored out of lcd_init() verbatim so lcd_recover() can re-run it
+ * before a bootstrap — the doc is explicit that this half "always runs",
  * separately from the BCM bringup. lcd_init()'s emitted grammar is
  * unchanged (the golden trace hw-lcd-trace pins it). */
 static void lcd_port_init(void)
@@ -268,10 +292,11 @@ int lcd_init(void)
     /*
      * Probe: nonzero means the BCM is powered (and, post-chainload,
      * initialized). Boot still relies ENTIRELY on that handoff — this
-     * deliberately does NOT bootstrap a dead BCM. That sequence is
-     * unverifiable off-hardware and its failure mode is a dead screen on
-     * a device whose only debug channel IS the screen, so it does not
-     * belong on the path every boot depends on.
+     * deliberately does NOT call bcm_init() on a failed probe. The
+     * bootstrap is unverifiable off-hardware and its failure mode is a
+     * dead screen on a device whose only debug channel IS the screen, so
+     * it ships as an explicit recovery entry point (lcd_recover) that
+     * nothing on the normal path calls. See the bootstrap block below.
      */
     return (mmio_read32(GPO32_VAL_ADDR) & GPO32_BCM_POWER) != 0;
 }
@@ -365,6 +390,35 @@ static int bcm_frame_commit(void)
          */
         rc = bcm_wait_idle_wall(BCM_LCDINIT_TIMEOUT_US);
         lcd_post_wake = 0;
+#if LCD_RECOVER_ON_WAKE
+        /* Recovery is wired to the POST-WAKE absorb only — the boot-time
+         * absorb deliberately does not trigger a re-bootstrap. At frame one
+         * the panel has never been shown to work in the first place, so a
+         * timeout there is far more likely to mean "this BCM was never alive"
+         * (emulator, dead unit) than "a working BCM wedged", and power-cycling
+         * it would trade a diagnosable boot for an unexplained dark screen. */
+        if (post_wake && rc != 0 && !lcd_in_recover) {
+            /*
+             * LAST RESORT. The BCM was given a window wider than the documented
+             * 500 ms panel init and still never retired the update — this is
+             * precisely the state that latched the panel solid white until a
+             * reboot, and from here every later frame is streamed into a BCM
+             * that will never consume it. Re-bootstrap it from scratch.
+             *
+             * Return WITHOUT the command + strobe below: lcd_recover() has
+             * already streamed and strobed a full frame at the freshly started
+             * BCM, and issuing a second update on top of that would hammer a
+             * BCM in mid-panel-init — the exact mechanism this branch exists to
+             * avoid. The pixels this call streamed died with the power cycle
+             * (the BCM's SDRAM framebuffer does not survive it), so the caller
+             * must repaint; the -1 says so.
+             */
+            lcd_timeouts++;
+            lcd_warn("lcd: post-wake BCM never retired — re-bootstrapping\n");
+            (void)lcd_recover();
+            return -1;
+        }
+#endif
     } else if (!lcd_first_frame) {
         uint32_t spin = BCM_IDLE_SPIN_LIMIT;
         uint32_t kick = BCM_REKICK_TRIPS;
@@ -655,4 +709,367 @@ void lcd_wake(void)
 int lcd_is_slept(void)
 {
     return lcd_slept;
+}
+
+/* ---- BCM bootstrap and firmware upload (RECOVERY PATH ONLY) ----------------
+ *
+ * Everything below implements 02-lcd.md, "Bootstrap and firmware upload"
+ * (lines 114-181) — the sequence that takes a powered-off or wedged BCM,
+ * uploads the `vmcs` firmware blob out of flash ROM, and starts it. Rockbox
+ * runs it on cold boot and again inside lcd_awake() after its panel-off
+ * power-gates the BCM (lines 450-495).
+ *
+ * WE DO NOT RUN IT ON BOOT. The chainload handoff (02-lcd.md, "Chainload
+ * handoff state") already leaves the BCM powered, bootstrapped and idle, and
+ * lcd_init() still relies on exactly that. This exists because the converse
+ * has no answer today: if the BCM ever wedges there is no code anywhere that
+ * can bring it back, and on a unit with no serial cable the framebuffer
+ * console is the only debug channel — an unrecoverable LCD is an
+ * unrecoverable device. So it lands as a deliberate, gated recovery entry
+ * point (lcd_recover) rather than on the path every boot depends on.
+ *
+ * WHICH STATE WE RECOVER FROM — this matters, and it is the one place we
+ * knowingly deviate from the doc's sequence. The doc's Stage 1 opens with
+ * `GPO32_VAL |= 0x4000` because Rockbox always arrives here from its own
+ * bcm_powerdown(), which cut that rail (line 460). OUR lcd_sleep()
+ * deliberately does NOT power-gate — it is the recoverable subset — so on our
+ * device the rail is still ASSERTED when the BCM wedges, and a bare OR would
+ * be a no-op that left the BCM's internal state exactly as stuck as it was.
+ * bcm_init() therefore power-CYCLES: drop the rail (the doc's own powerdown
+ * step), hold it off, then raise it and take the documented 50 ms settle. That
+ * makes the entry precondition true regardless of which state we came from,
+ * which is the whole point of a recovery path.
+ *
+ * BOUNDED WAITS. Every `while (...)` in the doc's listing is unbounded, and
+ * the core switches between 30 and 80 MHz, so iteration counts do not
+ * translate into time here. All the new waits are wall-clock, on USEC_TIMER,
+ * following bcm_wait_idle_wall/bcm_wall_delay above. The pre-existing
+ * bcm_write_addr / bcm_write32 / bcm_read32 helpers keep their trip-count
+ * bounds unchanged — they are already bounded, and re-basing them would
+ * change the register grammar of the shipping present path, which the golden
+ * traces pin deliberately.
+ *
+ * The timeout VALUES are ours: the doc records no timeouts for any of these
+ * waits. They are sized as "far past any plausible healthy answer".
+ */
+
+/* BCM-INTERNAL addresses. 02-lcd.md files these under "Magic constants we
+ * don't fully understand" (lines 173-179) — they came from iPodLinux
+ * reverse-engineering with no semantics beyond "this is what works". Kept
+ * here beside their use, next to the existing BCM_PANEL_CTL_ADDR, rather
+ * than in pp5022.h which describes PP registers. */
+#define BCM_SDRAM_MAP_ADDR      0x10000C00u  /* BCM SDRAM mapping control  */
+#define BCM_SDRAM_MAP_ENABLE    0xC0000000u  /* line 156: map BCM SDRAM    */
+#define BCM_SDRAM_MAP_DONE      0x00000001u  /* line 157: bit 0 = mapped   */
+#define BCM_FW_START_ADDR       0x10000400u  /* firmware startup trigger   */
+#define BCM_FW_START_MAGIC      0xA5A50002u  /* line 161                   */
+
+/* Wall-clock budgets for the bootstrap waits. The doc gives none of these;
+ * each is chosen well past any healthy answer so a bounded wait never turns a
+ * slow BCM into a failed recovery. */
+#define BCM_POWER_OFF_US        50000u   /* rail low before re-asserting; the
+                                          * >= 50 ms "since last power-off"
+                                          * guard from lcd_awake (line 471) */
+#define BCM_POWER_SETTLE_US     50000u   /* the doc's sleep(HZ/20), line 122 */
+#define BCM_HANDSHAKE_US       100000u   /* alt-control busy/ready waits     */
+#define BCM_SDRAM_MAP_US       100000u   /* SDRAM mapping (line 157)         */
+#define BCM_FW_START_US        500000u   /* firmware boot (line 162); scaled
+                                          * to the panel-init order of
+                                          * magnitude, the only BCM latency
+                                          * the doc quantifies at all      */
+
+/* Smallest byte count we will believe is a real firmware blob. Arbitrary —
+ * the doc records no size for the vmcs section. Its only job is to reject a
+ * zeroed or garbage directory entry, so it is set low enough that no
+ * plausible real blob trips it. */
+#define BCM_VMCS_MIN_BYTES      64u
+
+/*
+ * The 8-byte bootstrap handshake (02-lcd.md lines 132-134). Sent whole to
+ * BCM_CONTROL, then bytes 3..7 again to BCM_ALT_CONTROL (lines 135-136).
+ * The doc types it u8 while both ports are the 16-bit views, so these go out
+ * as 16-bit writes of byte values — matching how the driver already writes
+ * the 0x31 strobe to BCM_CONTROL.
+ */
+static const uint8_t bcm_boot_seq[8] = {
+    0xA1, 0x81, 0x91, 0x02, 0x12, 0x22, 0x72, 0x62
+};
+#define BCM_BOOT_SEQ_ALT_FIRST  3   /* line 136: the alt port replays 3..7 */
+
+/* Wall-clock bounded poll of a 16-bit BCM status port until `mask` reads set
+ * (want_set) or clear (!want_set). Returns 0 if the condition was met. */
+static int bcm_wait16(uintptr_t port, uint16_t mask, int want_set, uint32_t us)
+{
+    uint32_t t0    = mmio_read32(USEC_TIMER_ADDR);
+    uint32_t guard = BCM_WALL_GUARD_TRIPS;
+
+    while (((mmio_read16(port) & mask) != 0) != (want_set != 0)) {
+        if ((uint32_t)(mmio_read32(USEC_TIMER_ADDR) - t0) > us) {
+            return -1;
+        }
+        if (--guard == 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Wall-clock bounded poll of a BCM-INTERNAL word until any of `mask` is set
+ * (via the full bcm_read32 handshake). Returns 0 if it came up. */
+static int bcm_wait_internal(uint32_t bcm_addr, uint32_t mask, uint32_t us)
+{
+    uint32_t t0    = mmio_read32(USEC_TIMER_ADDR);
+    uint32_t guard = BCM_WALL_GUARD_TRIPS;
+
+    while ((bcm_read32(bcm_addr) & mask) == 0) {
+        if ((uint32_t)(mmio_read32(USEC_TIMER_ADDR) - t0) > us) {
+            return -1;
+        }
+        if (--guard == 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Locate and validate the BCM firmware blob in flash ROM.
+ *
+ * 02-lcd.md lines 165-171 say the `vmcs` section is found "via the flash
+ * directory at 0x200FFE00" using flash_get_section(ROM_ID('v','m','c','s')),
+ * and that its offset and length end up in flash_vmcs_offset /
+ * flash_vmcs_length.
+ *
+ * >>> UNVERIFIED: THE DIRECTORY ENTRY LAYOUT IS NOT IN THE DOC. <<<
+ * The doc names the directory's address and the lookup key and stops there —
+ * it gives no record size, no field order, and no tag byte order. So this
+ * scans the directory region for the four-character tag at 4-byte alignment
+ * and assumes the two words that FOLLOW it are {offset, length}. That
+ * assumption is the single most likely thing in this file to be wrong, and
+ * it is why nothing is uploaded until it has been validated:
+ *
+ *   - both tag byte orders are accepted (the doc pins neither);
+ *   - the offset is taken as ROM-relative if it is below the ROM base and
+ *     absolute otherwise (flash_get_section could plausibly return either);
+ *   - the result must land wholly inside the 1 MB ROM window, be at least
+ *     BCM_VMCS_MIN_BYTES long, and be 4-byte aligned (the upload streams
+ *     32-bit loads; an unaligned blob would fault on ARM);
+ *   - a tag whose following words fail any of that is treated as a false
+ *     positive and the scan CONTINUES, rather than trusting it.
+ *
+ * A blob we cannot validate is reported, never uploaded. Pushing garbage into
+ * the BCM's SRAM and then starting its processor on it is the one outcome
+ * strictly worse than leaving the panel wedged.
+ *
+ * ROM words are read through mmio_read32 rather than a pointer deref for two
+ * reasons: it is the same volatile load on the firmware target, and it makes
+ * the locator observable to the golden-trace test (a plain deref would be a
+ * wild host pointer).
+ */
+static int bcm_find_vmcs(uint32_t *out_addr, uint32_t *out_len)
+{
+    const uint32_t rom_end = FLASH_ROM_BASE + FLASH_ROM_SIZE;
+    const uint32_t words   = FLASH_DIR_BYTES / 4u;
+    int saw_tag = 0;
+
+    /* Stop 2 words early: a match needs its two following words to exist. */
+    for (uint32_t i = 0; i + 2u < words; i++) {
+        uint32_t tag = mmio_read32(FLASH_DIR_BASE + 4u * i);
+        if (tag != FLASH_ID_VMCS_BE && tag != FLASH_ID_VMCS_LE) {
+            continue;
+        }
+        saw_tag = 1;
+
+        uint32_t off  = mmio_read32(FLASH_DIR_BASE + 4u * (i + 1u));
+        uint32_t len  = mmio_read32(FLASH_DIR_BASE + 4u * (i + 2u));
+        uint32_t addr = (off < FLASH_ROM_BASE) ? (FLASH_ROM_BASE + off) : off;
+
+        if (addr < FLASH_ROM_BASE || addr >= rom_end) {
+            continue;                       /* not a ROM address    */
+        }
+        if (len < BCM_VMCS_MIN_BYTES || len > rom_end - addr) {
+            continue;                       /* implausible / overruns ROM */
+        }
+        if ((addr & 3u) != 0u) {
+            continue;                       /* 32-bit loads must be aligned */
+        }
+
+        *out_addr = addr;
+        *out_len  = len;
+        return LCD_BCM_OK;
+    }
+    return saw_tag ? LCD_BCM_ERR_BAD_BLOB : LCD_BCM_ERR_NO_BLOB;
+}
+
+int bcm_init(void)
+{
+    uint32_t blob_addr = 0;
+    uint32_t blob_len  = 0;
+    int rc;
+
+    /* Validate BEFORE touching any hardware: a bootstrap we cannot finish
+     * leaves the BCM worse off than not starting it (the power cycle below
+     * discards whatever state it still had). */
+    rc = bcm_find_vmcs(&blob_addr, &blob_len);
+    if (rc != LCD_BCM_OK) {
+        lcd_warn("lcd: no usable BCM firmware (vmcs) in flash ROM\n");
+        return rc;
+    }
+
+    /* ---- Stage 1 — power (02-lcd.md lines 120-125) --------------------
+     * The power CYCLE, not the doc's bare OR — see the deviation note in
+     * this section's header comment. Then the strap config: clear
+     * STRAP_OPT_A bits 0xF00 and drive the boot strap pins. */
+    mmio_write32(GPO32_VAL_ADDR,
+                 mmio_read32(GPO32_VAL_ADDR) & ~(uint32_t)GPO32_BCM_POWER);
+    bcm_wall_delay(BCM_POWER_OFF_US);
+    mmio_write32(GPO32_VAL_ADDR,
+                 mmio_read32(GPO32_VAL_ADDR) | (uint32_t)GPO32_BCM_POWER);
+    bcm_wall_delay(BCM_POWER_SETTLE_US);
+
+    mmio_write32(STRAP_OPT_A_ADDR,
+                 mmio_read32(STRAP_OPT_A_ADDR) & ~(uint32_t)STRAP_OPT_A_BCM_MASK);
+    mmio_write32(STRAP_BOOT_PINS_ADDR, STRAP_BOOT_PINS_BCM);
+
+    /* ---- Stage 2 — wait for the BCM, then handshake (lines 127-143) ---
+     * Busy must clear before ready may set; both gate the 8-byte sequence. */
+    if (bcm_wait16(BCM_ALT_CONTROL_ADDR, BCM_ALT_CONTROL_BUSY, 0,
+                   BCM_HANDSHAKE_US) != 0) {
+        lcd_warn("lcd: BCM bootstrap stalled (alt busy, stage 2)\n");
+        return LCD_BCM_ERR_ALT_BUSY;
+    }
+    if (bcm_wait16(BCM_ALT_CONTROL_ADDR, BCM_ALT_CONTROL_READY, 1,
+                   BCM_HANDSHAKE_US) != 0) {
+        lcd_warn("lcd: BCM bootstrap stalled (alt not ready, stage 2)\n");
+        return LCD_BCM_ERR_ALT_READY;
+    }
+
+    for (uint32_t i = 0; i < sizeof bcm_boot_seq; i++) {
+        mmio_write16(BCM_CONTROL_ADDR, bcm_boot_seq[i]);
+    }
+    for (uint32_t i = BCM_BOOT_SEQ_ALT_FIRST; i < sizeof bcm_boot_seq; i++) {
+        mmio_write16(BCM_ALT_CONTROL_ADDR, bcm_boot_seq[i]);
+    }
+
+    /* Post-handshake sync (lines 138-143): wait until BOTH read ports report
+     * ready, then dummy-read both write-address ports to flush them. The
+     * short-circuit && is the doc's own — the alt port is not sampled until
+     * the main one is ready. */
+    {
+        uint32_t t0    = mmio_read32(USEC_TIMER_ADDR);
+        uint32_t guard = BCM_WALL_GUARD_TRIPS;
+
+        while (!((mmio_read16(BCM_RD_ADDR_ADDR)     & BCM_RD_ADDR_READY) &&
+                 (mmio_read16(BCM_ALT_RD_ADDR_ADDR) & BCM_RD_ADDR_READY))) {
+            if ((uint32_t)(mmio_read32(USEC_TIMER_ADDR) - t0) >
+                BCM_HANDSHAKE_US || --guard == 0) {
+                lcd_warn("lcd: BCM read ports never came ready\n");
+                return LCD_BCM_ERR_PORTS;
+            }
+        }
+    }
+    (void)mmio_read16(BCM_WR_ADDR_ADDR);
+    (void)mmio_read16(BCM_ALT_WR_ADDR_ADDR);
+
+    /* ---- Stage 3 — upload the firmware blob (lines 145-152) -----------
+     * The same busy/ready gate again, then point the BCM write port at its
+     * SRAM base and stream the blob. */
+    if (bcm_wait16(BCM_ALT_CONTROL_ADDR, BCM_ALT_CONTROL_BUSY, 0,
+                   BCM_HANDSHAKE_US) != 0) {
+        lcd_warn("lcd: BCM bootstrap stalled (alt busy, upload)\n");
+        return LCD_BCM_ERR_UPLOAD_BUSY;
+    }
+    if (bcm_wait16(BCM_ALT_CONTROL_ADDR, BCM_ALT_CONTROL_READY, 1,
+                   BCM_HANDSHAKE_US) != 0) {
+        lcd_warn("lcd: BCM bootstrap stalled (alt not ready, upload)\n");
+        return LCD_BCM_ERR_UPLOAD_READY;
+    }
+
+    bcm_write_addr(BCMA_SRAM_BASE);
+    {
+        /* Line 151: the upload length rounds to an EVEN number of 16-bit
+         * units, ((len + 3) >> 1) & ~1 — i.e. a whole number of the 32-bit
+         * stores this bus actually takes, so halve it for the word count.
+         * The "& ~1" is redundant once halved (the shift discards bit 0
+         * regardless); it is kept so this reads as the doc's formula rather
+         * than as a simplification a reader would have to re-derive. */
+        const uint32_t units16 = ((blob_len + 3u) >> 1) & ~1u;
+        const uint32_t words32 = units16 >> 1;
+
+        for (uint32_t k = 0; k < words32; k++) {
+            mmio_write32(BCM_DATA_ADDR, mmio_read32(blob_addr + 4u * k));
+        }
+    }
+
+    /* ---- Initialize the BCM processor (lines 154-158) ------------------ */
+    bcm_write32(BCMA_COMMAND, 0);
+    bcm_write32(BCM_SDRAM_MAP_ADDR, BCM_SDRAM_MAP_ENABLE);
+    if (bcm_wait_internal(BCM_SDRAM_MAP_ADDR, BCM_SDRAM_MAP_DONE,
+                          BCM_SDRAM_MAP_US) != 0) {
+        lcd_warn("lcd: BCM SDRAM mapping never completed\n");
+        return LCD_BCM_ERR_SDRAM;
+    }
+    bcm_write32(BCM_SDRAM_MAP_ADDR, 0);
+
+    /* ---- Start BCM firmware execution (lines 160-162) ------------------
+     * The firmware announces itself by making BCMA_COMMAND read nonzero. */
+    bcm_write32(BCM_FW_START_ADDR, BCM_FW_START_MAGIC);
+    if (bcm_wait_internal(BCMA_COMMAND, 0xFFFFFFFFu, BCM_FW_START_US) != 0) {
+        lcd_warn("lcd: BCM firmware never started\n");
+        return LCD_BCM_ERR_START;
+    }
+
+    return LCD_BCM_OK;
+}
+
+uint32_t lcd_bcm_recoveries(void)
+{
+    return lcd_recoveries;
+}
+
+int lcd_recover(void)
+{
+    int rc;
+
+    /* lcd_fill() below re-enters bcm_frame_commit, which is one of our
+     * callers. One recovery at a time. */
+    if (lcd_in_recover) {
+        return LCD_BCM_ERR_BUSY;
+    }
+    lcd_in_recover = 1;
+
+    /* Count ATTEMPTS, not successes: a recovery that ran and failed is the
+     * single most useful thing a debug screen could show. */
+    lcd_recoveries++;
+
+    /* The host-side port setup "always runs", separately from the BCM
+     * bringup (02-lcd.md, "Host-side port init") — and we are about to
+     * re-drive the very GPO bit it configures, so re-run it first. */
+    lcd_port_init();
+
+    rc = bcm_init();
+    if (rc == LCD_BCM_OK) {
+        /*
+         * Re-establish panel + driver state. The BCM's SDRAM framebuffer did
+         * NOT survive the power cycle, so whatever it is scanning out now is
+         * undefined; drive one known full frame at it rather than leaving
+         * garbage on screen. lcd.c holds no back buffer, so black is the only
+         * frame we can produce here — the caller repaints.
+         *
+         * lcd_first_frame is re-armed so that fill's commit takes the plain
+         * post-handoff path (nothing is in flight on a BCM that just started),
+         * and lcd_post_wake is cleared across it so the fill does not try to
+         * absorb a panel init that has not been kicked off yet. It is set
+         * again afterwards because that fill IS what kicks the panel init
+         * off — so the NEXT commit is the slow one, exactly as after a wake.
+         */
+        lcd_slept      = 0;
+        lcd_first_frame = 1;
+        lcd_post_wake   = 0;
+        lcd_fill(0x0000);
+        lcd_post_wake   = 1;
+    }
+
+    lcd_in_recover = 0;
+    return rc;
 }

@@ -194,6 +194,26 @@ if target == 'sim'
   )
   test('hw-lcd-trace', lcd_trace_test, suite: 'unit')
 
+  # hw-bcm-init: the BCM bootstrap + firmware upload (bcm_init/lcd_recover in
+  # hal/hw/lcd.c) against the recording mock bus. This is a RECOVERY path that
+  # nothing on the normal boot path calls, and it can never run on the device
+  # without risking the only debug channel the device has — so this golden
+  # trace, asserted step for step against docs/hw/02-lcd.md "Bootstrap and
+  # firmware upload", is the only check it will ever get before hardware.
+  # Built with -DLCD_RECOVER_ON_WAKE=1 so the post-wake wiring is exercised
+  # too; the shipping image leaves that flag at its default of 0.
+  bcm_init_test = executable(
+    'bcm_init_test',
+    sources: ['hw_mmio/bcm_init_test.c',
+              'hw_mmio/mmio_mock.c',
+              '../hal/hw/lcd.c'],
+    include_directories: hw_mmio_inc,
+    c_args: ['-DMMIO_MOCK', '-DLCD_RECOVER_ON_WAKE=1',
+             '-Wno-unterminated-string-initialization'],
+    override_options: test_opts,
+  )
+  test('hw-bcm-init', bcm_init_test, suite: 'unit')
+
   # Static header<->doc consistency: pp5022.h addresses vs the
   # docs/hw/ reference + internal stride/window invariants. Pure source
   # parsing (no ARM build needed), so it runs in the common test path.
