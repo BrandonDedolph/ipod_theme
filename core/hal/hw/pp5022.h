@@ -475,6 +475,75 @@
 #define BCM_CONTROL     PP_REG16(BCM_CONTROL_ADDR)
 #endif
 
+/* ---------- BCM bootstrap / firmware upload ---------------------------
+ * core/docs/hw/02-lcd.md, "Bootstrap and firmware upload" (lines 114-181)
+ * plus "Sleep / wake" (bcm_powerdown's GPO32_VAL &= ~0x4000 power gate).
+ *
+ * NONE of this is on the normal boot path: the chainload handoff leaves
+ * the BCM powered, bootstrapped and idle (see the BCM block above), so
+ * these exist only for lcd_recover() — bringing a wedged BCM back from
+ * scratch, which is otherwise an unrecoverable device (the framebuffer
+ * console is the only debug channel on a unit with no serial cable).
+ *
+ * The three values 02-lcd.md explicitly files under "Magic constants we
+ * don't fully understand" (BCM-INTERNAL 0x10000C00 / 0x10000400 /
+ * 0x10001400) are deliberately NOT here: they address the BCM's own
+ * memory, not a PP register, and they live next to their use in lcd.c
+ * alongside the existing BCM_PANEL_CTL_ADDR.
+ */
+
+/* PP-side strap/boot-config registers poked before the BCM handshake
+ * (02-lcd.md, "Bootstrap and firmware upload", Stage 1, lines 124-125).
+ * The doc names STRAP_OPT_A and pins it to 0x70000008; the second
+ * register appears only as the bare literal `outl(0x1313, 0x70000040)`
+ * with the comment "strap pins for boot" and no symbol at all, so the
+ * name below is OURS, not transcribed. */
+#define STRAP_OPT_A_ADDR        0x70000008
+#define STRAP_OPT_A_BCM_MASK    0x00000F00  /* cleared before BCM bringup  */
+#define STRAP_BOOT_PINS_ADDR    0x70000040  /* unnamed in the doc          */
+#define STRAP_BOOT_PINS_BCM     0x00001313  /* "strap pins for boot"       */
+
+/* BCM_ALT_CONTROL handshake bits (02-lcd.md, lines 128-129 and 146-147:
+ * before each bootstrap phase, wait for 0x80 to CLEAR then for 0x40 to
+ * SET). The doc gives the masks but no names for them. */
+#define BCM_ALT_CONTROL_BUSY    0x80
+#define BCM_ALT_CONTROL_READY   0x40
+
+/* BCM-internal SRAM base — the firmware blob's upload destination
+ * (02-lcd.md line 149: bcm_write_addr(BCMA_SRAM_BASE), "0x0 in
+ * BCM-internal mem"). Same family as BCMA_CMDPARAM/COMMAND/STATUS. */
+#define BCMA_SRAM_BASE          0x0
+
+/* ---------- Flash ROM window (holds the BCM `vmcs` firmware blob) -----
+ * 01-soc-pp5022.md memory map ("ROM / flash 0x20000000-0x200FFFFF, 1 MB")
+ * and 02-lcd.md lines 165-171: the blob is located via the flash
+ * directory at 0x200FFE00 (ROM base 0x20000000 + 0xFFE00 — the doc
+ * carries a correction note about exactly this address losing a zero).
+ *
+ * Deliberately NOT named *_ADDR. These are ROM *memory* addresses, not
+ * peripheral registers, and tests/scripts/check_hw_consistency.py's
+ * window check is a list of MMIO peripheral windows — ROM is not one of
+ * them, and widening that list to admit memory would blunt the very
+ * dropped-digit check this address is the poster child for.
+ */
+#define FLASH_ROM_BASE          0x20000000u
+#define FLASH_ROM_SIZE          0x00100000u
+#define FLASH_DIR_BASE          0x200FFE00u
+#define FLASH_DIR_BYTES  (FLASH_ROM_BASE + FLASH_ROM_SIZE - FLASH_DIR_BASE)
+
+#ifndef __ASSEMBLER__
+/* Four-character ROM section tag, e.g. ROM_ID('v','m','c','s')
+ * (02-lcd.md line 167: flash_get_section(ROM_ID('v','m','c','s'), ...)).
+ * The doc does NOT state which byte order the directory stores the tag
+ * in, so both packings are defined and lcd.c accepts either — see the
+ * UNVERIFIED block over bcm_find_vmcs(). */
+#define ROM_ID_BE(a,b,c,d) (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | \
+                            ((uint32_t)(c) <<  8) |  (uint32_t)(d))
+#define ROM_ID_LE(a,b,c,d) ROM_ID_BE(d,c,b,a)
+#define FLASH_ID_VMCS_BE   ROM_ID_BE('v','m','c','s')
+#define FLASH_ID_VMCS_LE   ROM_ID_LE('v','m','c','s')
+#endif
+
 /* ---------- Audio: device clock gating (DEV_EN / DEV_RS bits) --------
  * core/docs/hw/05-audio.md, "MCLK / clock-gating enable path", and
  * core/docs/hw/09-i2c.md, "Controller init". DEV_EN (0x6000600C) and

@@ -18,8 +18,15 @@
  *
  * lcd_first_frame is a file-static shared with lcd_fill; this binary
  * calls lcd_present_fb first, so the first case hits the first-frame
- * (no wait-for-idle) path, exactly like lcd_trace_test orders its
- * fill cases.
+ * path, exactly like lcd_trace_test orders its fill cases.
+ *
+ * NOTE (changed): the first frame no longer SKIPS the wait-for-idle. It
+ * used to, on the strength of ipodloader2's synchronous final frame
+ * (02-lcd.md, "Chainload handoff state"). Booting directly out of the
+ * firmware partition as OSOS removes ipodloader2, and nothing else
+ * establishes that idle guarantee — so the first frame now runs the
+ * wall-clock absorb (single bcm_read32, no re-kick) that the post-wake
+ * path uses. That is the one existing expectation this file changes.
  */
 
 #include "pp5022.h"
@@ -58,11 +65,34 @@ static void expect_write_addr(trace_cursor *tc, uint32_t addr)
     expect_r(tc, 16, BCM_CONTROL_ADDR);
 }
 
-/* First frame after handoff: skips wait-for-idle, streams the frame. */
+/*
+ * One wall-clock absorb (bcm_wait_idle_wall): the USEC_TIMER baseline read
+ * followed by a single bcm_read32(BCMA_COMMAND) that reads idle. No re-kick
+ * — that is the whole point of the absorb. Used by the first-frame and
+ * post-wake commits.
+ */
+static void expect_absorb_idle(trace_cursor *tc)
+{
+    expect_r(tc, 32, USEC_TIMER_ADDR);             /* wall-clock baseline */
+    expect_r(tc, 16, BCM_RD_ADDR_ADDR);            /* RD_ADDR_READY poll  */
+    expect_w(tc, 32, BCM_RD_ADDR_ADDR, BCMA_COMMAND);
+    expect_r(tc, 16, BCM_CONTROL_ADDR);            /* RD_READY poll       */
+    expect_r(tc, 32, BCM_DATA_ADDR);               /* status word: idle   */
+}
+
+/*
+ * First frame. Streams the frame, then ABSORBS: we no longer assume the
+ * previous stage left the BCM idle (see this file's header note), so the
+ * commit does one wall-clock-bounded, re-kick-free idle read before issuing
+ * the command. BCM_DATA is left unprogrammed so that read returns 0 = idle,
+ * i.e. the healthy case costs exactly one read handshake.
+ */
 static int test_lcd_present_first_frame(void)
 {
     mmio_mock_reset();
-    mmio_mock_set_read(BCM_CONTROL_ADDR, BCM_CONTROL_WR_READY);
+    mmio_mock_set_read(BCM_CONTROL_ADDR,
+                       BCM_CONTROL_WR_READY | BCM_CONTROL_RD_READY);
+    mmio_mock_set_read(BCM_RD_ADDR_ADDR, BCM_RD_ADDR_READY);
 
     fill_pattern();
     lcd_present_fb(g_fb);
@@ -74,6 +104,7 @@ static int test_lcd_present_first_frame(void)
     for (unsigned i = 0; i < FRAME_WORDS; i++) {
         expect_w(&tc, 32, BCM_DATA_ADDR, expected_pair(i));
     }
+    expect_absorb_idle(&tc);
     expect_write_addr(&tc, BCMA_COMMAND);
     expect_w(&tc, 32, BCM_DATA_ADDR, BCMCMD_LCD_UPDATE);      /* 0xFFFF0000 */
     expect_w(&tc, 16, BCM_CONTROL_ADDR, BCM_CONTROL_STROBE);  /* 0x31 */
