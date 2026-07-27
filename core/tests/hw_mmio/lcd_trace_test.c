@@ -108,11 +108,39 @@ static void expect_write_addr(trace_cursor *tc, uint32_t addr)
     expect_r(tc, 16, BCM_CONTROL_ADDR);
 }
 
-/* First frame after handoff: skips wait-for-idle, streams the frame. */
+/*
+ * One wall-clock absorb (bcm_wait_idle_wall): the USEC_TIMER baseline read
+ * followed by a single bcm_read32(BCMA_COMMAND) that reads idle, and NO
+ * re-kick. Used by the first-frame and post-wake commits.
+ */
+static void expect_absorb_idle(trace_cursor *tc)
+{
+    expect_r(tc, 32, USEC_TIMER_ADDR);             /* wall-clock baseline */
+    expect_r(tc, 16, BCM_RD_ADDR_ADDR);            /* RD_ADDR_READY poll  */
+    expect_w(tc, 32, BCM_RD_ADDR_ADDR, BCMA_COMMAND);
+    expect_r(tc, 16, BCM_CONTROL_ADDR);            /* RD_READY poll       */
+    expect_r(tc, 32, BCM_DATA_ADDR);               /* status word: idle   */
+}
+
+/*
+ * First frame. Streams the frame, then ABSORBS.
+ *
+ * CHANGED: this case used to assert that the first frame skipped the
+ * wait-for-idle entirely, on the strength of ipodloader2 finishing its final
+ * frame synchronously (02-lcd.md, "Chainload handoff state"). Booting our
+ * image directly from the firmware partition as OSOS removes ipodloader2 from
+ * the picture and nothing else establishes that guarantee — the Apple ROM is
+ * documented to power/init the BCM but never to hand over idle, and its panel
+ * init alone can run ~500 ms. So the first commit now runs the same
+ * wall-clock-bounded, re-kick-free absorb the post-wake commit uses. On a
+ * healthy device (BCM_DATA reads idle, as here) it costs one read handshake.
+ */
 static int test_lcd_fill_first_frame(void)
 {
     mmio_mock_reset();
-    mmio_mock_set_read(BCM_CONTROL_ADDR, BCM_CONTROL_WR_READY);
+    mmio_mock_set_read(BCM_CONTROL_ADDR,
+                       BCM_CONTROL_WR_READY | BCM_CONTROL_RD_READY);
+    mmio_mock_set_read(BCM_RD_ADDR_ADDR, BCM_RD_ADDR_READY);
 
     const uint16_t rgb  = 0xF800;                      /* red */
     const uint32_t pair = ((uint32_t)rgb << 16) | rgb; /* 0xF800F800 */
@@ -123,6 +151,7 @@ static int test_lcd_fill_first_frame(void)
     for (uint32_t i = 0; i < (LCD_WIDTH * LCD_HEIGHT) / 2u; i++) {
         expect_w(&tc, 32, BCM_DATA_ADDR, pair);
     }
+    expect_absorb_idle(&tc);
     expect_write_addr(&tc, BCMA_COMMAND);
     expect_w(&tc, 32, BCM_DATA_ADDR, BCMCMD_LCD_UPDATE);   /* 0xFFFF0000 */
     expect_w(&tc, 16, BCM_CONTROL_ADDR, BCM_CONTROL_STROBE); /* 0x31 */

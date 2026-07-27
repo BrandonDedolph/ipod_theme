@@ -7,14 +7,18 @@
  * "Memory-mapped BCM interface", "LCD update protocol"), verified
  * against Rockbox lcd-video.c / ipodloader2 fb.c (2026-06-11).
  *
- * No BCM bootstrap here: the chainload handoff (02-lcd.md, "Chainload
- * handoff state") guarantees the Apple flash ROM already powered the
- * BCM and uploaded its firmware, and ipodloader2 finished its last
- * frame synchronously — the BCM arrives powered, awake and idle. We
- * use the Rockbox-BOOTLOADER update variant: point the write port at
- * the framebuffer, stream params/data, THEN wait for the previous
- * update to retire (skipped on the first frame), write the command,
- * strobe, and return without a completion wait. Waiting AFTER the
+ * No BCM bootstrap here. Boot relies on the Apple flash ROM having
+ * powered the BCM and uploaded its firmware before any loader runs
+ * (02-lcd.md, "Chainload handoff state") — that part holds whether we
+ * are chainloaded or dispatched straight out of the firmware partition
+ * as OSOS. What does NOT survive dropping ipodloader2 is its extra
+ * guarantee that the BCM is handed over IDLE, so the first frame no
+ * longer assumes that; see lcd_first_frame.
+ *
+ * For frames we use the Rockbox-BOOTLOADER update variant: point the
+ * write port at the framebuffer, stream params/data, THEN wait for the
+ * previous update to retire, write the command, strobe, and return
+ * without a completion wait. Waiting AFTER the
  * ~150 KB pixel stream — not before it — matches Rockbox's ordering
  * (the stream is the completion delay) and is what lets repeated
  * presents work: polling right after the previous strobe hits the BCM
@@ -87,8 +91,31 @@
  */
 #define BCM_REKICK_TRIPS     (BCM_IDLE_SPIN_LIMIT >> 4)
 
-/* First-frame flag: the chainload handoff guarantees an idle BCM, so
- * the initial lcd_fill skips the wait-for-idle read entirely. */
+/*
+ * First-frame flag. This used to mean "skip the wait-for-idle entirely,
+ * because the chainload handoff guarantees an idle BCM". It no longer does.
+ *
+ * That guarantee was specifically an ipodloader2 property (02-lcd.md,
+ * "Chainload handoff state": it finishes its final frame SYNCHRONOUSLY,
+ * polling completion before jumping to the loaded image). Booting our image
+ * directly out of the firmware partition as OSOS removes ipodloader2 from the
+ * picture entirely, and nothing else establishes it — the Apple flash ROM
+ * powers the BCM, uploads its firmware and inits the panel, but nowhere is it
+ * documented to hand over with no update in flight, and its panel init alone
+ * is documented to take up to 500 ms.
+ *
+ * So the first frame now WAITS, and the flag only selects WHICH wait. What we
+ * genuinely do not know at frame one is whether the previous stage left an
+ * update (or a panel init) still running, so it takes the same absorb the
+ * post-wake path takes: wall-clock bounded, and NO re-kick — hammering fresh
+ * commands at a BCM that is mid-panel-init is what latches it. Cost on a
+ * healthy device is one bounded read handshake, once, at boot: whoever booted
+ * us has long since gone idle and it returns on the first read.
+ *
+ * Steady-state frames keep the trip-counted re-kick path below, which is
+ * tuned for the common case (the ~150 KB pixel stream already retired the
+ * previous update) and is unchanged.
+ */
 static int lcd_first_frame = 1;
 
 /* ---------------------------------------------------------------------------
@@ -214,22 +241,38 @@ static uint32_t bcm_read32(uint32_t addr)
     return mmio_read32(BCM_DATA_ADDR);
 }
 
-int lcd_init(void)
+/* Host-side port init (02-lcd.md, "Host-side port init"; from Rockbox
+ * lcd_init_device, verified 2026-06-11 — runs even when the BCM is
+ * already alive): BCM power rail + companion bit as GPO, GPIOC bit 6 =
+ * BCM interrupt pin as a GPIO input, bit 7 released to its alternate
+ * function, GPO32 bit 0 released.
+ *
+ * Factored out of lcd_init() verbatim so a BCM bootstrap can re-run it
+ * before bringup — the doc is explicit that this half "always runs",
+ * separately from the BCM bringup. lcd_init()'s emitted grammar is
+ * unchanged (the golden trace hw-lcd-trace pins it). */
+static void lcd_port_init(void)
 {
-    /* Host-side port init (02-lcd.md, "Host-side port init"; from
-     * Rockbox lcd_init_device, verified 2026-06-11 — runs even when
-     * the BCM is already alive): BCM power rail + companion bit as
-     * GPO, GPIOC bit 6 = BCM interrupt pin as a GPIO input, bit 7
-     * released to its alternate function, GPO32 bit 0 released. */
     mmio_write32(GPO32_ENABLE_ADDR, mmio_read32(GPO32_ENABLE_ADDR) | 0xC000);
     mmio_write32(GPIOC_ENABLE_ADDR, mmio_read32(GPIOC_ENABLE_ADDR) & ~0x80);
     mmio_write32(GPIOC_ENABLE_ADDR, mmio_read32(GPIOC_ENABLE_ADDR) | 0x40);
     mmio_write32(GPIOC_OUTPUT_EN_ADDR,
                  mmio_read32(GPIOC_OUTPUT_EN_ADDR) & ~0x40);
     mmio_write32(GPO32_ENABLE_ADDR, mmio_read32(GPO32_ENABLE_ADDR) & ~1u);
+}
 
-    /* Probe: nonzero means the BCM is powered (and, post-chainload,
-     * initialized). We do not bootstrap a dead BCM in this PR. */
+int lcd_init(void)
+{
+    lcd_port_init();
+
+    /*
+     * Probe: nonzero means the BCM is powered (and, post-chainload,
+     * initialized). Boot still relies ENTIRELY on that handoff — this
+     * deliberately does NOT bootstrap a dead BCM. That sequence is
+     * unverifiable off-hardware and its failure mode is a dead screen on
+     * a device whose only debug channel IS the screen, so it does not
+     * belong on the path every boot depends on.
+     */
     return (mmio_read32(GPO32_VAL_ADDR) & GPO32_BCM_POWER) != 0;
 }
 
@@ -295,21 +338,28 @@ static int bcm_wait_idle_wall(uint32_t us)
 static int bcm_frame_commit(void)
 {
     int rc = 0;
+    const int post_wake = lcd_post_wake;
 
-    if (lcd_post_wake) {
+    if (post_wake || lcd_first_frame) {
         /*
-         * FIRST COMMIT AFTER A PANEL WAKE. 02-lcd.md: this update can take up
-         * to 500 ms because the BCM is running internal LCD panel init. The
-         * ordinary path below budgets BCM_IDLE_SPIN_LIMIT (512 polls, on the
-         * order of milliseconds) and RE-KICKS LCD_UPDATE up to
+         * THE TWO "WE DON'T KNOW WHAT THE BCM IS DOING" COMMITS: the first
+         * one after a panel wake, and the very first one after boot.
+         *
+         * Post-wake, 02-lcd.md: the update can take up to 500 ms because the
+         * BCM is running internal LCD panel init. At boot we inherit whatever
+         * the previous stage left running — under a direct ROM boot (no
+         * ipodloader2) that may include the Apple ROM's own panel init, which
+         * the doc times at the same ~500 ms; see lcd_first_frame above.
+         *
+         * The ordinary path below budgets BCM_IDLE_SPIN_LIMIT (512 polls, on
+         * the order of milliseconds) and RE-KICKS LCD_UPDATE up to
          * BCM_IDLE_SPIN_LIMIT/BCM_REKICK_TRIPS times inside that window — so
          * it hammers new update commands into a BCM that is mid-panel-init,
          * and later presents stream fresh pixels into the same in-progress
          * init. That is how the BCM ends up permanently latched: the screen
-         * wakes to solid white and only a reboot recovers, because we have no
-         * bcm_init() to bootstrap it back.
+         * wakes to solid white and only a reboot recovers.
          *
-         * So the post-wake commit ABSORBS instead: a wall-clock window wider
+         * So both of these commits ABSORB instead: a wall-clock window wider
          * than the documented panel-init time, and NO re-kick. Re-kicking is
          * the failure mechanism here, not the cure.
          */
