@@ -46,7 +46,7 @@
 
 #define ARTCACHE_DIM   28          /* list-chip cover is 28x28 RGB565 (taller
                                     * two-line rows give room for a bigger chip) */
-#define ARTCACHE_SLOTS 256         /* album indices the cache accepts, i.e. the
+#define ARTCACHE_SLOTS 1024         /* album indices the cache accepts, i.e. the
                                     * whole library (LIB_MAX_ALBUMS). This is a
                                     * KEY RANGE + a 12-byte directory entry —
                                     * NOT a decoded thumbnail each. */

@@ -24,7 +24,7 @@
 #define BROWSE_MAX 128
 /* Max entries in the PLAYBACK queue — larger than a browse listing so
  * "Shuffle Songs" can hold the whole library, not just one album. */
-#define QUEUE_MAX  1200
+#define QUEUE_MAX  6000
 #define NAME_MAX   64                    /* stored display name (Nunito, ASCII)  */
 
 /* One list row: a subdirectory or a playable file. Shared between the browser

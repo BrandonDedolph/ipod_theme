@@ -481,7 +481,7 @@ static int g_det_sel, g_det_accum;    /* tracklist   (depth 1) */
  * kept "Kid Laroi" and "The Kid LAROI" from splitting into two entries). Built
  * once by library_ensure, sorted A->Z; g_albumview is the on-screen slice
  * (all, or one artist's). */
-#define LIB_MAX_ALBUMS 256
+#define LIB_MAX_ALBUMS 1024
 typedef struct {
     char     folder[NAME_MAX + 1];
     uint32_t clus;                       /* album folder cluster                  */
@@ -1454,7 +1454,7 @@ static void albumlist_render(int sel)
  * from the "Artist - Album" folder names. Selecting one filters the album list
  * (g_artist_filter) to just that artist's albums.
  * ------------------------------------------------------------------------- */
-#define ARTISTS_MAX 96
+#define ARTISTS_MAX 512
 /* Each artist carries a representative album cover (its first album's) so the
  * Artists list can show a chip, same as albums — indexed, no per-row scan. */
 typedef struct {
@@ -1585,8 +1585,8 @@ static void browse_render(int sel)
  * library into RAM. The anti-skip buffer (~30 s) covers playback while the scan
  * hits the disk, so it can run without dropouts. Rebuilt only once per session.
  * ------------------------------------------------------------------------- */
-#define LIB_MAX_SONGS  1200
-#define LIB_MAX_GENRES 48
+#define LIB_MAX_SONGS  6000
+#define LIB_MAX_GENRES 128
 #define LIB_TITLE_MAX  48
 #define LIB_GENRE_MAX  24
 
@@ -2152,20 +2152,61 @@ static void library_scan(fat32_t *fs)
     g_lib_scanned = 1;
 }
 
+
+/*
+ * Bottom-up merge sort over an index array.
+ *
+ * Both library sorts were insertion sorts, which is fine at a few hundred
+ * entries and quadratic beyond that: at the old 1200-song cap the song sort
+ * already cost ~720k case-insensitive string compares, and raising the cap
+ * would have made "Loading Library" grow with the SQUARE of the library. This
+ * is O(n log n), stable (so equal titles keep their load order), and needs one
+ * scratch array of the same length.
+ */
+typedef int (*idx_cmp_fn)(uint16_t a, uint16_t b);
+
+static void merge_sort_idx(uint16_t *a, int n, uint16_t *tmp, idx_cmp_fn cmp)
+{
+    for (int width = 1; width < n; width *= 2) {
+        for (int lo = 0; lo < n; lo += 2 * width) {
+            int mid = lo + width;
+            int hi  = lo + 2 * width;
+            if (mid > n) mid = n;
+            if (hi  > n) hi  = n;
+            int i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) {
+                /* <= keeps the sort STABLE: a tie takes the left run first. */
+                tmp[k++] = (cmp(a[i], a[j]) <= 0) ? a[i++] : a[j++];
+            }
+            while (i < mid) tmp[k++] = a[i++];
+            while (j < hi)  tmp[k++] = a[j++];
+        }
+        for (int i = 0; i < n; i++) a[i] = tmp[i];
+    }
+}
+
+/* Scratch for merge_sort_idx. Sized to the larger of the two things sorted. */
+static uint16_t g_sort_tmp[LIB_MAX_SONGS];
+
+/* Album sort keys, parsed ONCE. split_artist_album is a string scan, and the
+ * old insertion sort re-ran it twice per comparison. */
+static char g_album_key[LIB_MAX_ALBUMS][NAME_MAX + 1];
+
+static int song_title_cmp_idx(uint16_t a, uint16_t b)
+{
+    return title_cmp(g_songs[a].title, g_songs[b].title);
+}
+
+static int album_key_cmp_idx(uint16_t a, uint16_t b)
+{
+    return title_cmp(g_album_key[a], g_album_key[b]);
+}
+
 /* Shared post-load: title-sort the index array + precompute per-genre counts. */
 static void library_finish(void)
 {
     for (int i = 0; i < g_songs_n; i++) g_song_sorted[i] = (uint16_t)i;
-    for (int i = 1; i < g_songs_n; i++) {   /* insertion sort by title */
-        uint16_t v = g_song_sorted[i];
-        int j = i - 1;
-        while (j >= 0 && title_cmp(g_songs[g_song_sorted[j]].title,
-                                   g_songs[v].title) > 0) {
-            g_song_sorted[j + 1] = g_song_sorted[j];
-            j--;
-        }
-        g_song_sorted[j + 1] = v;
-    }
+    merge_sort_idx(g_song_sorted, g_songs_n, g_sort_tmp, song_title_cmp_idx);
     for (int i = 0; i < g_genres_n; i++) g_genre_count[i] = 0;
     for (int i = 0; i < g_songs_n; i++) {
         int g = g_songs[i].genre;
@@ -2175,19 +2216,39 @@ static void library_finish(void)
     /* Alphabetise the album list A->Z by album title (insertion sort; the list
      * is small). g_albumview is derived from this, so the menu is sorted too.
      * The lookup indexes are (re)built AFTER this, since the sort moves albums. */
-    for (int i = 1; i < g_albums_n; i++) {
-        lib_album_t v = g_albums[i];
-        char va[NAME_MAX + 1], vk[NAME_MAX + 1];
-        split_artist_album(v.folder, va, vk);
-        int j = i - 1;
-        while (j >= 0) {
-            char ja[NAME_MAX + 1], jk[NAME_MAX + 1];
-            split_artist_album(g_albums[j].folder, ja, jk);
-            if (title_cmp(jk, vk) <= 0) break;
-            g_albums[j + 1] = g_albums[j];
-            j--;
+    {
+        int n = g_albums_n;
+        for (int i = 0; i < n; i++) {
+            char artist[NAME_MAX + 1];
+            split_artist_album(g_albums[i].folder, artist, g_album_key[i]);
+            g_albumview[i] = (uint16_t)i;          /* reused as the order array */
         }
-        g_albums[j + 1] = v;
+        merge_sort_idx(g_albumview, n, g_sort_tmp, album_key_cmp_idx);
+
+        /*
+         * Apply the permutation in place by following cycles, so we never need
+         * a second full lib_album_t array (85 B x LIB_MAX_ALBUMS). g_albumview
+         * is rebuilt by the caller right after this.
+         *
+         * The swap loop SCATTERS (dst[P[i]] = src[i]); what the sort gives us
+         * is a GATHER order (dst[k] = src[order[k]]). So invert first — with
+         * the raw order it silently produces the inverse permutation, i.e. a
+         * scrambled album list that is still a valid permutation and therefore
+         * looks plausible. Verified against a reference implementation over 200
+         * randomised trials (order, stability, and this in-place apply).
+         */
+        for (int k = 0; k < n; k++) g_sort_tmp[g_albumview[k]] = (uint16_t)k;
+        for (int i = 0; i < n; i++) {
+            while (g_sort_tmp[i] != (uint16_t)i) {
+                int j = g_sort_tmp[i];
+                lib_album_t t = g_albums[i];
+                g_albums[i] = g_albums[j];
+                g_albums[j] = t;
+                uint16_t tk = g_sort_tmp[i];
+                g_sort_tmp[i] = g_sort_tmp[j];
+                g_sort_tmp[j] = tk;
+            }
+        }
     }
 
     lookup_build();                        /* song-by-name + album-by-cluster */
