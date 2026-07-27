@@ -59,12 +59,31 @@ typedef struct {
  * artcache_scratch() so the rest of the UI need not carry a second copy. */
 static album_t  g_album[ARTCACHE_SLOTS];
 static uint8_t  g_noart[(ARTCACHE_SLOTS + 7) / 8];
+/* One bit per album: "a disk read for this cover already failed once". Lets a
+ * transient read error be retried exactly once before we give up on it, without
+ * letting a permanently unreadable file re-issue a read on every pump. */
+static uint8_t  g_retried[(ARTCACHE_SLOTS + 7) / 8];
 static way_t    g_way[ARTCACHE_WAYS];
 static uint8_t  g_scratch[ARTCACHE_SCRATCH_SZ];
 
 /* Monotonic "draw order" counter. At ~6 stamps per frame and 30 fps a u32 lasts
  * ~270 days of continuous scrolling; a wrap costs at worst one bad eviction. */
 static uint32_t g_clock;
+
+static int retried(int idx)
+{
+    return (g_retried[idx >> 3] >> (idx & 7)) & 1;
+}
+
+static void set_retried(int idx, int on)
+{
+    uint8_t bit = (uint8_t)(1u << (idx & 7));
+    if (on) {
+        g_retried[idx >> 3] |= bit;
+    } else {
+        g_retried[idx >> 3] = (uint8_t)(g_retried[idx >> 3] & ~bit);
+    }
+}
 
 static int noart(int idx)
 {
@@ -103,6 +122,9 @@ void artcache_reset(void)
     }
     for (unsigned i = 0; i < sizeof g_noart; i++) {
         g_noart[i] = 0;
+    }
+    for (unsigned i = 0; i < sizeof g_retried; i++) {
+        g_retried[i] = 0;
     }
     for (int i = 0; i < ARTCACHE_WAYS; i++) {
         g_way[i].key   = -1;
@@ -153,6 +175,7 @@ void artcache_queue(int idx, uint32_t thm_clus, uint32_t thm_size,
     /* Different art for this album: forget the old verdict and the old pixels
      * so the next artcache_get re-arms it. */
     set_noart(idx, 0);
+    set_retried(idx, 0);
     int w = find(idx);
     if (w >= 0) {
         g_way[w].key   = -1;
@@ -198,14 +221,25 @@ const uint16_t *artcache_get(int idx)
     return 0;                                  /* pump will fill it */
 }
 
-/* Read + validate a CoreArt sidecar (clus/size) into g_scratch and shrink it
- * into `dst` (ARTCACHE_DIM square). Returns 1 on success, 0 on any failure. */
+/*
+ * Read + validate a CoreArt sidecar (clus/size) into g_scratch and shrink it
+ * into `dst` (ARTCACHE_DIM square).
+ *
+ * Returns 1 on success, 0 when this album DEFINITIVELY has no usable art here
+ * (nothing registered, or the file is not a valid sidecar), and -1 when the
+ * DISK READ ITSELF failed. The caller must not confuse the last two: a read
+ * error is transient and deserves a retry, whereas latching it as "no art"
+ * blanks the album for the rest of the session.
+ */
 static int load_one(fat32_t *fs, uint32_t clus, uint32_t size, uint16_t *dst)
 {
     if (clus == 0 || size < ARTCACHE_HDR_LEN || size > sizeof g_scratch) {
-        return 0;
+        return 0;                              /* nothing registered */
     }
     int32_t n = fat32_read_file(fs, clus, g_scratch, size);
+    if (n < 0) {
+        return -1;                             /* disk read failed — retryable */
+    }
     if (n < (int32_t)ARTCACHE_HDR_LEN) {
         return 0;
     }
@@ -254,18 +288,38 @@ int artcache_pump(fat32_t *fs)
      * ARTCACHE_DIM (28x28) by tools/coreart.py, so the load is a ~1.5KB read +
      * a 1:1 copy — no big read, no resample. folder.art (120x120) is only the
      * fallback for an album that somehow lacks a thm. */
-    int ok = load_one(fs, al->thm_clus, al->thm_size, s->px) ||
-             load_one(fs, al->art_clus, al->art_size, s->px);
-
-    if (ok) {
-        s->state = WAY_LOADED;
-    } else {
-        /* No usable art: remember that in one bit and hand the way back, so a
-         * cover-less album costs no pixels and is never retried. */
-        set_noart(s->key, 1);
-        s->key   = -1;
-        s->state = WAY_EMPTY;
-        s->stamp = 0;
+    int r = load_one(fs, al->thm_clus, al->thm_size, s->px);
+    if (r == 0) {
+        r = load_one(fs, al->art_clus, al->art_size, s->px);
     }
+
+    if (r == 1) {
+        s->state = WAY_LOADED;
+        return 1;
+    }
+
+    int key = s->key;
+    s->key   = -1;
+    s->state = WAY_EMPTY;
+    s->stamp = 0;
+
+    if (r < 0 && !retried(key)) {
+        /*
+         * The READ failed rather than the art being absent. Hand the way back
+         * WITHOUT latching a verdict, so the next paint re-queues it and we
+         * try once more. This matters most for the first album in the list:
+         * its cover is the first read issued after the library load, i.e. the
+         * most likely one to hit a drive still spinning up — and latching that
+         * left exactly one album permanently blank while every other cover
+         * appeared. Bounded to a single retry so a genuinely unreadable file
+         * cannot re-issue a disk read on every pump forever.
+         */
+        set_retried(key, 1);
+        return 1;
+    }
+
+    /* No usable art, or a read that failed twice: remember it in one bit so a
+     * cover-less album costs no pixels and is not retried. */
+    set_noart(key, 1);
     return 1;
 }
