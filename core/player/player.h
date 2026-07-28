@@ -105,6 +105,17 @@ int  player_last_error(void);
 uint32_t player_open_seq(void);
 
 /*
+ * Monotonic counter, bumped once each time the queue reaches its end and the
+ * player goes idle BY ITSELF (auto-advance found no next track). NOT bumped by
+ * player_stop(), a manual skip, or starting a new queue.
+ *
+ * The UI needs this to distinguish "the album finished" from "still playing":
+ * a finished queue has to drop any saved resume position, or the next boot
+ * restores a track the listener already heard to the end, cued at 0:00.
+ */
+uint32_t player_end_seq(void);
+
+/*
  * Seek within the current track. player_seek_to takes an absolute position in
  * seconds (clamped to the track length); player_seek_seconds moves relative to
  * the current position. Both return 0 on success, -1 when nothing is playing,

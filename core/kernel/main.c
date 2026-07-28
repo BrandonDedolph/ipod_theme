@@ -3843,7 +3843,8 @@ static int wheel_move(int sel, int count, int8_t delta, int *accum)
 #define RESUME_DUR_SLOP    2u
 
 static uint32_t g_resume_open_seq;      /* player_open_seq() when last captured */
-static uint32_t g_resume_last_us;       /* when we last considered capturing    */
+static uint32_t g_resume_last_us;       /* when we last considered capturing     */
+static uint32_t g_resume_end_seq;       /* last seen player_end_seq()            */
 static int      g_resume_was_paused;    /* pause state when last captured       */
 
 /*
@@ -4296,6 +4297,9 @@ _Noreturn static void run_ui(fat32_t *fs)
     int last_qidx  = was_active ? player_queue_current() : -1;
     g_resume_open_seq   = player_open_seq();
     g_resume_was_paused = player_paused();
+    /* Seeded AFTER resume_restore: a restore that had to skip a broken track
+     * bumps the end counter, and that must not read as "the queue finished". */
+    g_resume_end_seq    = player_end_seq();
     g_resume_last_us    = mmio_read32(USEC_TIMER_ADDR);
     for (;;) {
         /* Time the pump: when it returns in a few microseconds the decode step
@@ -4348,6 +4352,27 @@ _Noreturn static void run_ui(fat32_t *fs)
          * left a dead Now Playing behind a Queue view, and left every other screen
          * un-repainted. */
         if (was_active && !now_active) {
+            /*
+             * If the queue ended BY ITSELF, drop the saved resume position.
+             * resume_capture() deliberately keeps the last locator when
+             * nothing is loaded ("nothing loaded — keep the last one"), which
+             * is right for a stop but wrong here: the listener heard the track
+             * to the end, so restoring it on the next boot re-presents a
+             * finished song cued at 0:00 (device, 2026-07-27).
+             *
+             * Gated on player_end_seq() rather than on this transition alone,
+             * so a manual stop still keeps its position.
+             */
+            uint32_t eseq = player_end_seq();
+            if (eseq != g_resume_end_seq) {
+                g_resume_end_seq = eseq;
+                if (g_settings.resume_hash != 0) {
+                    g_settings.resume_hash  = 0;
+                    g_settings.resume_secs  = 0;
+                    g_settings.resume_total = 0;
+                    settings_touch();
+                }
+            }
             /* Playback truly ended (stop / queue exhausted / skip past the ends —
              * NOT an inter-track advance, which never reads inactive here since
              * advance+open complete inside one player_pump). Power the codec down

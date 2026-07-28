@@ -933,6 +933,12 @@ static void pending_commit(void)
 /* Advance to the next playable file in the queue (skipping folders and any that
  * fail to open). Marks the player idle when the queue is exhausted. Used for
  * the immediate (non-prefetched) paths: a broken first track, mainly. */
+/* Bumped once each time the queue runs out on its own (never on a user stop,
+ * a skip, or a new queue). See player_end_seq(). */
+static uint32_t g_pl_end_seq;
+
+uint32_t player_end_seq(void) { return g_pl_end_seq; }
+
 static void player_advance(void)
 {
     /* Close only a validly-open decoder. player_advance is also called after a
@@ -952,7 +958,13 @@ static void player_advance(void)
         int nxt = g_shuffle ? queue_random_playable(g_queue_idx)
                             : next_playable(g_queue_idx);
         if (nxt < 0) {
-            return;                      /* queue done → idle */
+            /* Queue done → idle. Bump the end counter so the UI can tell
+             * "the album finished on its own" apart from "still playing" —
+             * they are otherwise indistinguishable from outside, and a
+             * finished queue must NOT leave a resume position pointing at a
+             * track the listener already heard to the end. */
+            g_pl_end_seq++;
+            return;
         }
         g_queue_idx = nxt;
         if (player_open_current() == 0) {
