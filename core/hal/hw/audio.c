@@ -107,6 +107,18 @@ static uint32_t          g_rate     = 44100u;
 static volatile int      g_primed;
 static volatile uint32_t g_kick_us;
 static volatile uint32_t g_kick_bytes;   /* byte count of the outstanding kick */
+/*
+ * Bytes of the outstanding kick already clocked out when hal_audio_stop() cut
+ * the DMA — sampled THERE, not recomputed on resume.
+ *
+ * hal_audio_start() used to derive this itself from (now - g_kick_us), which
+ * is only the frames-consumed figure if no time has passed since the stop.
+ * Across a real pause it also counts every second the user sat paused, so it
+ * always saturated at g_kick_bytes: the remainder of the buffer the listener
+ * was in the middle of hearing got dropped and playback jumped into the next
+ * one. Audible as a stutter/skip on every unpause (device, 2026-07-27).
+ */
+static volatile uint32_t g_stop_done;
 
 /*
  * DMA-visible physical address of a buffer. SDRAM is dual-mapped: our .bss
@@ -290,16 +302,14 @@ void hal_audio_start(void)
          * every unpause.
          *
          * Pick up inside the active buffer at the point the DMA had reached
-         * when we stopped. The I2S FIFO paces the DMA at exactly the sample
-         * rate, so elapsed microseconds since the kick convert straight into
-         * frames consumed (accurate to the ~16-frame FIFO depth). Round DOWN
-         * to a whole frame so the L/R phase cannot invert.
+         * when we stopped — g_stop_done, sampled by hal_audio_stop() at the
+         * moment it cut the engine. Deriving it here instead (from
+         * now - g_kick_us) counted the pause itself, so it always saturated
+         * and dropped the rest of the buffer the listener was hearing.
          */
-        uint32_t elapsed = mmio_read32(USEC_TIMER_ADDR) - g_kick_us;
-        uint32_t frames  = (uint32_t)(((uint64_t)elapsed * g_rate) / 1000000u);
-        uint32_t done    = frames * 4u;                  /* bytes, frame-aligned */
+        uint32_t done = g_stop_done;     /* measured at stop; see g_stop_done */
         if (done > g_kick_bytes) {
-            done = g_kick_bytes;
+            done = g_kick_bytes;         /* defensive: kick changed under us */
         }
         uint32_t left = g_kick_bytes - done;
         g_running = 1;
@@ -388,6 +398,22 @@ void hal_audio_stop(void)
     g_running = 0;
     mmio_write32(CPU_INT_DIS_ADDR, DMA_MASK);   /* mask IRQ 26 */
     dma_playback_stop();
+    /*
+     * Sample the DMA position NOW — after dma_playback_stop(), because the
+     * engine kept clocking bytes through the mute above (wm8758_mute is an
+     * I2C transfer, milliseconds of audio at 44.1 kHz), and before any more
+     * time can pass. Rounded DOWN to a whole frame so L/R phase cannot
+     * invert.
+     */
+    {
+        uint32_t elapsed = mmio_read32(USEC_TIMER_ADDR) - g_kick_us;
+        uint32_t frames  = (uint32_t)(((uint64_t)elapsed * g_rate) / 1000000u);
+        uint32_t done    = frames * 4u;
+        if (done > g_kick_bytes) {
+            done = g_kick_bytes;
+        }
+        g_stop_done = done;
+    }
     clock_set_audio_dma_active(0);              /* clocks may move again */
     /* g_primed deliberately survives: the buffers still hold unplayed PCM and
      * hal_audio_start() resumes into them (see there). */
