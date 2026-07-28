@@ -38,7 +38,22 @@
  *              starts. PIL convention; positive means "this glyph's
  *              top is N px below the ascender." text.c converts to
  *              baseline-relative coordinates internally.
- * advance      pen advance after drawing this glyph, in pixels.
+ * advance      pen advance after drawing this glyph, in 1/64 px
+ *              (26.6 fixed point) — NOT whole pixels.
+ *
+ *              It used to be whole pixels, rounded per glyph by the
+ *              generator. At 9-13px a glyph's true advance is
+ *              routinely a half pixel (Nunito regular-13 'k' is
+ *              6.500, 't' is 4.547), so rounding each one
+ *              independently made adjacent gaps in the same word
+ *              differ by ~1px — the "letters aren't evenly spaced"
+ *              look — and the error accumulated along a string
+ *              (+1.81px across "Yesterday", +2.37px across "The
+ *              Velvet Underground" at bold-13), which also
+ *              mis-centres centred text.
+ *
+ *              Widening this field is FREE: the struct was 7 bytes
+ *              padded to 8, and is still 8.
  */
 typedef struct {
     uint16_t data_offset;
@@ -46,8 +61,14 @@ typedef struct {
     uint8_t  h;
     int8_t   offset_x;
     int8_t   offset_y;
-    uint8_t  advance;
+    uint16_t advance;
 } atlas_glyph_t;
+
+/* Fixed-point shift for atlas_glyph_t.advance (1/64 px). */
+#define ATLAS_ADV_SHIFT 6
+#define ATLAS_ADV_ONE   (1 << ATLAS_ADV_SHIFT)
+/* Round a 26.6 pen position to whole pixels. */
+#define ATLAS_ADV_PX(v) (((v) + (ATLAS_ADV_ONE / 2)) >> ATLAS_ADV_SHIFT)
 
 typedef struct {
     const atlas_glyph_t *glyphs;          /* 95 ASCII + non-ASCII extras */

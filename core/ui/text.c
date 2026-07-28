@@ -193,10 +193,11 @@ static int notdef_w(const atlas_t *a) {
     return w < 3 ? 3 : w;
 }
 
-/* Pen advance for the box, incl. a 1px side bearing either side. text_width and
- * text_draw_c MUST agree on this or the returned pen drifts from the measure. */
+/* Pen advance for the box, incl. a 1px side bearing either side, in 26.6 like
+ * every other advance. text_width and text_draw_c MUST agree on this or the
+ * returned pen drifts from the measure. */
 static int notdef_advance(const atlas_t *a) {
-    return notdef_w(a) + 2;
+    return (notdef_w(a) + 2) << ATLAS_ADV_SHIFT;
 }
 
 /* Advance for a codepoint with no atlas glyph (blank or box). */
@@ -210,6 +211,12 @@ int text_width(const char *s, const text_font_t *font) {
     if (!font || !s) return 0;
     const atlas_t *a = font->a;
     const unsigned char *p = (const unsigned char *)s;
+    /*
+     * Accumulate in 26.6 and round ONCE at the end, so a string's width is the
+     * rounded true width rather than the sum of per-glyph roundings. Rounding
+     * per glyph is what used to drift a title by 1-2px against its own
+     * centring.
+     */
     int w = 0, cp;
     while ((cp = utf8_next(&p)) >= 0) {
         int gi = glyph_index(cp);
@@ -219,7 +226,7 @@ int text_width(const char *s, const text_font_t *font) {
         }
         w += a->glyphs[gi].advance;
     }
-    return w;
+    return ATLAS_ADV_PX(w);
 }
 
 int text_line_height(const text_font_t *font) {
@@ -288,14 +295,27 @@ static int text_draw_c(uint16_t *fb, int fb_w, int fb_h, int x, int y,
     uint8_t ib_lin = srgb5_to_linear[ib5];
 
     const unsigned char *p = (const unsigned char *)s;
+    /*
+     * The pen runs in 26.6 (`pen`) relative to the caller's integer `x`, and
+     * each glyph is placed at the pen ROUNDED to a whole pixel. Blitting is
+     * still pixel-aligned — this is not subpixel positioning — but the
+     * fractional part carries forward instead of being thrown away per glyph,
+     * which is what made adjacent gaps in one word differ by ~1px.
+     *
+     * `x0` is kept so the return value is the caller's x plus the rounded
+     * total, matching text_width() exactly. Callers chain on that.
+     */
+    const int x0 = x;
+    int pen = 0;
     int cp;
     while ((cp = utf8_next(&p)) >= 0) {
+        x = x0 + ATLAS_ADV_PX(pen);
         int gi = glyph_index(cp);
         if (gi < 0) {
             if (!is_blank_cp(cp)) {
                 draw_notdef(fb, fb_w, x, y, a, ink, cx0, cx1, cy0, cy1);
             }
-            x += fallback_advance(a, cp);
+            pen += fallback_advance(a, cp);
             continue;
         }
         const atlas_glyph_t *gly = &a->glyphs[gi];
@@ -314,14 +334,15 @@ static int text_draw_c(uint16_t *fb, int fb_w, int fb_h, int x, int y,
          * on. At or right of it: nothing further can land, so stop drawing —
          * but keep summing advances, since callers chain on the returned pen. */
         if (gx + gw <= cx0) {
-            x += gly->advance;
+            pen += gly->advance;
             continue;
         }
         if (gx >= cx1) {
-            x += gly->advance;
+            pen += gly->advance;
             while ((cp = utf8_next(&p)) >= 0) {
                 int gj = glyph_index(cp);
-                x += (gj < 0) ? fallback_advance(a, cp) : a->glyphs[gj].advance;
+                pen += (gj < 0) ? fallback_advance(a, cp)
+                                : a->glyphs[gj].advance;
             }
             break;
         }
@@ -334,7 +355,7 @@ static int text_draw_c(uint16_t *fb, int fb_w, int fb_h, int x, int y,
         int j0 = cy0 - gy; if (j0 < 0) j0 = 0;
         int j1 = cy1 - gy; if (j1 > gh) j1 = gh;
         if (i0 >= i1 || j0 >= j1) {
-            x += gly->advance;
+            pen += gly->advance;
             continue;
         }
 
@@ -376,9 +397,9 @@ static int text_draw_c(uint16_t *fb, int fb_w, int fb_h, int x, int y,
                 *dst = (uint16_t)(((uint16_t)r5 << 11) | ((uint16_t)g6 << 5) | (uint16_t)b5);
             }
         }
-        x += gly->advance;
+        pen += gly->advance;
     }
-    return x;
+    return x0 + ATLAS_ADV_PX(pen);
 }
 
 int text_draw(uint16_t *fb, int fb_w, int fb_h, int x, int y,

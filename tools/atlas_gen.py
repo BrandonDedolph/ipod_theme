@@ -44,6 +44,13 @@ from PIL import Image, ImageDraw, ImageFont
 # a header that compiles cleanly and draws garbage.
 DATA_OFFSET_MAX = 0xFFFF
 
+# Advance fixed-point scale. MUST match ATLAS_ADV_SHIFT/ATLAS_ADV_ONE in
+# core/ui/atlas.h — the generated headers are consumed directly by the device
+# renderer, so a mismatch here silently rescales all text spacing.
+ADV_SHIFT = 6
+ADV_ONE = 1 << ADV_SHIFT
+ADVANCE_MAX = 0xFFFF                 # the uint16_t field it is emitted into
+
 PRINTABLE = range(0x20, 0x7F)  # 0x20..0x7E inclusive — 95 glyphs
 
 # Non-ASCII glyphs appended AFTER the 95 ASCII glyphs, at fixed indices 95, 96,
@@ -113,7 +120,14 @@ def render_atlas(ttf_path: str, px_size: int, symbol: str) -> str:
 
     def add_glyph(ch):
         bbox = font.getbbox(ch)  # (left, top, right, bottom) — top<0 = above baseline
-        advance = int(round(font.getlength(ch)))
+        # 26.6 fixed point (1/64 px), NOT whole pixels. Rounding each glyph's
+        # advance to an integer here is what made letter spacing look uneven:
+        # at 9-13px a true advance is routinely a half pixel, so neighbouring
+        # gaps in one word disagreed by ~1px and the error accumulated along
+        # the string. The device pen carries the fraction (core/ui/atlas.h,
+        # ATLAS_ADV_*). Costs nothing: the glyph struct was 7 bytes padded to
+        # 8 and is still 8.
+        advance = int(round(font.getlength(ch) * ADV_ONE))
 
         if not bbox or (bbox[2] - bbox[0]) <= 0 or (bbox[3] - bbox[1]) <= 0:
             # Whitespace / no ink. Record an empty glyph with just an advance.
@@ -184,7 +198,7 @@ def render_atlas(ttf_path: str, px_size: int, symbol: str) -> str:
             f"    [{idx:2d}] = {{ .data_offset = {off:5d}, "
             f".w = {w:3d}, .h = {h:3d}, "
             f".offset_x = {ox:3d}, .offset_y = {oy:3d}, "
-            f".advance = {adv:3d} }},   // {label}"
+            f".advance = {adv:5d} }},   // {label}"
         )
     out.append("};")
     out.append("")

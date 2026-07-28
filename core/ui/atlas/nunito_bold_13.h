@@ -995,204 +995,204 @@ static const uint8_t NUNITO_BOLD_13_DATA[] = {
 };
 
 static const atlas_glyph_t NUNITO_BOLD_13_GLYPHS[198] = {
-    [ 0] = { .data_offset =     0, .w =   0, .h =   0, .offset_x =   0, .offset_y =   0, .advance =   4 },   // 0x20 ' '
-    [ 1] = { .data_offset =     0, .w =   3, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   3 },   // 0x21 '!'
-    [ 2] = { .data_offset =    30, .w =   6, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   6 },   // 0x22 '"'
-    [ 3] = { .data_offset =    90, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x23 '#'
-    [ 4] = { .data_offset =   170, .w =   8, .h =  14, .offset_x =   0, .offset_y =   2, .advance =   8 },   // 0x24 '$'
-    [ 5] = { .data_offset =   282, .w =  12, .h =  12, .offset_x =   0, .offset_y =   3, .advance =  12 },   // 0x25 '%'
-    [ 6] = { .data_offset =   426, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   9 },   // 0x26 '&'
-    [ 7] = { .data_offset =   526, .w =   3, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   3 },   // 0x27 '''
-    [ 8] = { .data_offset =   556, .w =   5, .h =  14, .offset_x =   0, .offset_y =   3, .advance =   5 },   // 0x28 '('
-    [ 9] = { .data_offset =   626, .w =   5, .h =  14, .offset_x =   0, .offset_y =   3, .advance =   5 },   // 0x29 ')'
-    [10] = { .data_offset =   696, .w =   6, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   6 },   // 0x2A '*'
-    [11] = { .data_offset =   762, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   8 },   // 0x2B '+'
-    [12] = { .data_offset =   818, .w =   3, .h =   5, .offset_x =   0, .offset_y =  11, .advance =   3 },   // 0x2C ','
-    [13] = { .data_offset =   833, .w =   6, .h =   5, .offset_x =   0, .offset_y =   9, .advance =   6 },   // 0x2D '-'
-    [14] = { .data_offset =   863, .w =   3, .h =   3, .offset_x =   0, .offset_y =  11, .advance =   3 },   // 0x2E '.'
-    [15] = { .data_offset =   872, .w =   6, .h =  12, .offset_x =  -1, .offset_y =   3, .advance =   4 },   // 0x2F '/'
-    [16] = { .data_offset =   944, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x30 '0'
-    [17] = { .data_offset =  1024, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x31 '1'
-    [18] = { .data_offset =  1104, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x32 '2'
-    [19] = { .data_offset =  1184, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x33 '3'
-    [20] = { .data_offset =  1264, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x34 '4'
-    [21] = { .data_offset =  1344, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x35 '5'
-    [22] = { .data_offset =  1424, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x36 '6'
-    [23] = { .data_offset =  1504, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x37 '7'
-    [24] = { .data_offset =  1584, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x38 '8'
-    [25] = { .data_offset =  1664, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x39 '9'
-    [26] = { .data_offset =  1744, .w =   3, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   3 },   // 0x3A ':'
-    [27] = { .data_offset =  1765, .w =   3, .h =   9, .offset_x =   0, .offset_y =   7, .advance =   3 },   // 0x3B ';'
-    [28] = { .data_offset =  1792, .w =   8, .h =   8, .offset_x =   0, .offset_y =   6, .advance =   8 },   // 0x3C '<'
-    [29] = { .data_offset =  1856, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   8 },   // 0x3D '='
-    [30] = { .data_offset =  1912, .w =   8, .h =   8, .offset_x =   0, .offset_y =   6, .advance =   8 },   // 0x3E '>'
-    [31] = { .data_offset =  1976, .w =   6, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   6 },   // 0x3F '?'
-    [32] = { .data_offset =  2036, .w =  12, .h =  13, .offset_x =   0, .offset_y =   4, .advance =  12 },   // 0x40 '@'
-    [33] = { .data_offset =  2192, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =  10 },   // 0x41 'A'
-    [34] = { .data_offset =  2292, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   9 },   // 0x42 'B'
-    [35] = { .data_offset =  2382, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   9 },   // 0x43 'C'
-    [36] = { .data_offset =  2472, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =  10 },   // 0x44 'D'
-    [37] = { .data_offset =  2572, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x45 'E'
-    [38] = { .data_offset =  2652, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   7 },   // 0x46 'F'
-    [39] = { .data_offset =  2732, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =  10 },   // 0x47 'G'
-    [40] = { .data_offset =  2832, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =  10 },   // 0x48 'H'
-    [41] = { .data_offset =  2932, .w =   4, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   4 },   // 0x49 'I'
-    [42] = { .data_offset =  2972, .w =   5, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   5 },   // 0x4A 'J'
-    [43] = { .data_offset =  3022, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   9 },   // 0x4B 'K'
-    [44] = { .data_offset =  3112, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   7 },   // 0x4C 'L'
-    [45] = { .data_offset =  3192, .w =  11, .h =  10, .offset_x =   0, .offset_y =   4, .advance =  11 },   // 0x4D 'M'
-    [46] = { .data_offset =  3302, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =  10 },   // 0x4E 'N'
-    [47] = { .data_offset =  3402, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =  10 },   // 0x4F 'O'
-    [48] = { .data_offset =  3502, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x50 'P'
-    [49] = { .data_offset =  3582, .w =  10, .h =  13, .offset_x =   0, .offset_y =   4, .advance =  10 },   // 0x51 'Q'
-    [50] = { .data_offset =  3712, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   9 },   // 0x52 'R'
-    [51] = { .data_offset =  3802, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x53 'S'
-    [52] = { .data_offset =  3882, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x54 'T'
-    [53] = { .data_offset =  3962, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =  10 },   // 0x55 'U'
-    [54] = { .data_offset =  4062, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   9 },   // 0x56 'V'
-    [55] = { .data_offset =  4162, .w =  15, .h =  10, .offset_x =   0, .offset_y =   4, .advance =  14 },   // 0x57 'W'
-    [56] = { .data_offset =  4312, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   9 },   // 0x58 'X'
-    [57] = { .data_offset =  4402, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x59 'Y'
-    [58] = { .data_offset =  4482, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x5A 'Z'
-    [59] = { .data_offset =  4562, .w =   5, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   5 },   // 0x5B '['
-    [60] = { .data_offset =  4627, .w =   6, .h =  12, .offset_x =  -1, .offset_y =   3, .advance =   4 },   // 0x5C '\'
-    [61] = { .data_offset =  4699, .w =   5, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   5 },   // 0x5D ']'
-    [62] = { .data_offset =  4764, .w =   8, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   8 },   // 0x5E '^'
-    [63] = { .data_offset =  4836, .w =   7, .h =   3, .offset_x =   0, .offset_y =  13, .advance =   6 },   // 0x5F '_'
-    [64] = { .data_offset =  4857, .w =   5, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   5 },   // 0x60 '`'
-    [65] = { .data_offset =  4912, .w =   7, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   7 },   // 0x61 'a'
-    [66] = { .data_offset =  4961, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x62 'b'
-    [67] = { .data_offset =  5041, .w =   7, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   6 },   // 0x63 'c'
-    [68] = { .data_offset =  5090, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x64 'd'
-    [69] = { .data_offset =  5170, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   7 },   // 0x65 'e'
-    [70] = { .data_offset =  5226, .w =   6, .h =  11, .offset_x =  -1, .offset_y =   3, .advance =   5 },   // 0x66 'f'
-    [71] = { .data_offset =  5292, .w =   8, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   8 },   // 0x67 'g'
-    [72] = { .data_offset =  5372, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // 0x68 'h'
-    [73] = { .data_offset =  5452, .w =   3, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   3 },   // 0x69 'i'
-    [74] = { .data_offset =  5482, .w =   4, .h =  13, .offset_x =  -1, .offset_y =   4, .advance =   3 },   // 0x6A 'j'
-    [75] = { .data_offset =  5534, .w =   7, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   7 },   // 0x6B 'k'
-    [76] = { .data_offset =  5604, .w =   5, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   4 },   // 0x6C 'l'
-    [77] = { .data_offset =  5654, .w =  11, .h =   7, .offset_x =   0, .offset_y =   7, .advance =  11 },   // 0x6D 'm'
-    [78] = { .data_offset =  5731, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   8 },   // 0x6E 'n'
-    [79] = { .data_offset =  5787, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   7 },   // 0x6F 'o'
-    [80] = { .data_offset =  5843, .w =   8, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   8 },   // 0x70 'p'
-    [81] = { .data_offset =  5923, .w =   8, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   8 },   // 0x71 'q'
-    [82] = { .data_offset =  6003, .w =   6, .h =   8, .offset_x =   0, .offset_y =   6, .advance =   5 },   // 0x72 'r'
-    [83] = { .data_offset =  6051, .w =   7, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   6 },   // 0x73 's'
-    [84] = { .data_offset =  6100, .w =   6, .h =   9, .offset_x =  -1, .offset_y =   5, .advance =   5 },   // 0x74 't'
-    [85] = { .data_offset =  6154, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   8 },   // 0x75 'u'
-    [86] = { .data_offset =  6210, .w =   7, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   7 },   // 0x76 'v'
-    [87] = { .data_offset =  6259, .w =  11, .h =   7, .offset_x =   0, .offset_y =   7, .advance =  11 },   // 0x77 'w'
-    [88] = { .data_offset =  6336, .w =   7, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   7 },   // 0x78 'x'
-    [89] = { .data_offset =  6385, .w =   7, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   7 },   // 0x79 'y'
-    [90] = { .data_offset =  6455, .w =   6, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   6 },   // 0x7A 'z'
-    [91] = { .data_offset =  6497, .w =   6, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   5 },   // 0x7B '{'
-    [92] = { .data_offset =  6575, .w =   4, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   4 },   // 0x7C '|'
-    [93] = { .data_offset =  6627, .w =   6, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   5 },   // 0x7D '}'
-    [94] = { .data_offset =  6705, .w =   8, .h =   6, .offset_x =   0, .offset_y =   8, .advance =   8 },   // 0x7E '~'
-    [95] = { .data_offset =  6753, .w =   4, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   4 },   // U+2039 '‹' (extra)
-    [96] = { .data_offset =  6781, .w =   4, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   4 },   // U+203A '›' (extra)
-    [97] = { .data_offset =  6809, .w =   3, .h =   6, .offset_x =   0, .offset_y =   8, .advance =   3 },   // U+00B7 '·' (extra)
-    [98] = { .data_offset =  6827, .w =   3, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   3 },   // U+2018 '‘' (extra)
-    [99] = { .data_offset =  6857, .w =   3, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   3 },   // U+2019 '’' (extra)
-    [100] = { .data_offset =  6887, .w =   6, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   6 },   // U+201C '“' (extra)
-    [101] = { .data_offset =  6947, .w =   6, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   6 },   // U+201D '”' (extra)
-    [102] = { .data_offset =  7007, .w =   8, .h =   5, .offset_x =  -1, .offset_y =   9, .advance =   6 },   // U+2013 '–' (extra)
-    [103] = { .data_offset =  7047, .w =  15, .h =   5, .offset_x =  -1, .offset_y =   9, .advance =  13 },   // U+2014 '—' (extra)
-    [104] = { .data_offset =  7122, .w =  10, .h =   3, .offset_x =   0, .offset_y =  11, .advance =  10 },   // U+2026 '…' (extra)
-    [105] = { .data_offset =  7152, .w =   3, .h =  11, .offset_x =   0, .offset_y =   6, .advance =   3 },   // U+00A1 '¡' (extra)
-    [106] = { .data_offset =  7185, .w =   8, .h =  11, .offset_x =   0, .offset_y =   5, .advance =   8 },   // U+00A2 '¢' (extra)
-    [107] = { .data_offset =  7273, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // U+00A3 '£' (extra)
-    [108] = { .data_offset =  7363, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   8 },   // U+00A4 '¤' (extra)
-    [109] = { .data_offset =  7419, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // U+00A5 '¥' (extra)
-    [110] = { .data_offset =  7499, .w =   4, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   4 },   // U+00A6 '¦' (extra)
-    [111] = { .data_offset =  7551, .w =   8, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   7 },   // U+00A7 '§' (extra)
-    [112] = { .data_offset =  7655, .w =   7, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   7 },   // U+00A8 '¨' (extra)
-    [113] = { .data_offset =  7732, .w =  11, .h =  12, .offset_x =   0, .offset_y =   3, .advance =  11 },   // U+00A9 '©' (extra)
-    [114] = { .data_offset =  7864, .w =   5, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   4 },   // U+00AA 'ª' (extra)
-    [115] = { .data_offset =  7909, .w =   6, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   6 },   // U+00AB '«' (extra)
-    [116] = { .data_offset =  7951, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   8 },   // U+00AC '¬' (extra)
-    [117] = { .data_offset =  8007, .w =  11, .h =  12, .offset_x =   0, .offset_y =   3, .advance =  11 },   // U+00AE '®' (extra)
-    [118] = { .data_offset =  8139, .w =   7, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   7 },   // U+00AF '¯' (extra)
-    [119] = { .data_offset =  8216, .w =   5, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   5 },   // U+00B0 '°' (extra)
-    [120] = { .data_offset =  8271, .w =   8, .h =   8, .offset_x =   0, .offset_y =   6, .advance =   8 },   // U+00B1 '±' (extra)
-    [121] = { .data_offset =  8335, .w =   5, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   5 },   // U+00B2 '²' (extra)
-    [122] = { .data_offset =  8380, .w =   5, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   5 },   // U+00B3 '³' (extra)
-    [123] = { .data_offset =  8425, .w =   5, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   5 },   // U+00B4 '´' (extra)
-    [124] = { .data_offset =  8480, .w =   8, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   8 },   // U+00B5 'µ' (extra)
-    [125] = { .data_offset =  8560, .w =   8, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   8 },   // U+00B6 '¶' (extra)
-    [126] = { .data_offset =  8664, .w =   5, .h =   4, .offset_x =   0, .offset_y =  13, .advance =   5 },   // U+00B8 '¸' (extra)
-    [127] = { .data_offset =  8684, .w =   5, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   5 },   // U+00B9 '¹' (extra)
-    [128] = { .data_offset =  8729, .w =   6, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   5 },   // U+00BA 'º' (extra)
-    [129] = { .data_offset =  8783, .w =   6, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   6 },   // U+00BB '»' (extra)
-    [130] = { .data_offset =  8825, .w =  13, .h =  12, .offset_x =   0, .offset_y =   3, .advance =  12 },   // U+00BC '¼' (extra)
-    [131] = { .data_offset =  8981, .w =  13, .h =  12, .offset_x =   0, .offset_y =   3, .advance =  12 },   // U+00BD '½' (extra)
-    [132] = { .data_offset =  9137, .w =  12, .h =  12, .offset_x =   0, .offset_y =   3, .advance =  12 },   // U+00BE '¾' (extra)
-    [133] = { .data_offset =  9281, .w =   7, .h =  11, .offset_x =   0, .offset_y =   6, .advance =   6 },   // U+00BF '¿' (extra)
-    [134] = { .data_offset =  9358, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00C0 'À' (extra)
-    [135] = { .data_offset =  9498, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00C1 'Á' (extra)
-    [136] = { .data_offset =  9638, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00C2 'Â' (extra)
-    [137] = { .data_offset =  9778, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00C3 'Ã' (extra)
-    [138] = { .data_offset =  9918, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00C4 'Ä' (extra)
-    [139] = { .data_offset = 10058, .w =  10, .h =  15, .offset_x =   0, .offset_y =  -1, .advance =  10 },   // U+00C5 'Å' (extra)
-    [140] = { .data_offset = 10208, .w =  14, .h =  10, .offset_x =  -1, .offset_y =   4, .advance =  13 },   // U+00C6 'Æ' (extra)
-    [141] = { .data_offset = 10348, .w =   9, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   9 },   // U+00C7 'Ç' (extra)
-    [142] = { .data_offset = 10465, .w =   8, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   8 },   // U+00C8 'È' (extra)
-    [143] = { .data_offset = 10577, .w =   8, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   8 },   // U+00C9 'É' (extra)
-    [144] = { .data_offset = 10689, .w =   8, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   8 },   // U+00CA 'Ê' (extra)
-    [145] = { .data_offset = 10801, .w =   8, .h =  13, .offset_x =   0, .offset_y =   1, .advance =   8 },   // U+00CB 'Ë' (extra)
-    [146] = { .data_offset = 10905, .w =   5, .h =  14, .offset_x =  -1, .offset_y =   0, .advance =   4 },   // U+00CC 'Ì' (extra)
-    [147] = { .data_offset = 10975, .w =   4, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   4 },   // U+00CD 'Í' (extra)
-    [148] = { .data_offset = 11031, .w =   5, .h =  14, .offset_x =  -1, .offset_y =   0, .advance =   4 },   // U+00CE 'Î' (extra)
-    [149] = { .data_offset = 11101, .w =   4, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   4 },   // U+00CF 'Ï' (extra)
-    [150] = { .data_offset = 11157, .w =  11, .h =  10, .offset_x =  -1, .offset_y =   4, .advance =  10 },   // U+00D0 'Ð' (extra)
-    [151] = { .data_offset = 11267, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00D1 'Ñ' (extra)
-    [152] = { .data_offset = 11407, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00D2 'Ò' (extra)
-    [153] = { .data_offset = 11547, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00D3 'Ó' (extra)
-    [154] = { .data_offset = 11687, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00D4 'Ô' (extra)
-    [155] = { .data_offset = 11827, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00D5 'Õ' (extra)
-    [156] = { .data_offset = 11967, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00D6 'Ö' (extra)
-    [157] = { .data_offset = 12107, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   8 },   // U+00D7 '×' (extra)
-    [158] = { .data_offset = 12163, .w =  10, .h =  12, .offset_x =   0, .offset_y =   3, .advance =  10 },   // U+00D8 'Ø' (extra)
-    [159] = { .data_offset = 12283, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00D9 'Ù' (extra)
-    [160] = { .data_offset = 12423, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00DA 'Ú' (extra)
-    [161] = { .data_offset = 12563, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00DB 'Û' (extra)
-    [162] = { .data_offset = 12703, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =  10 },   // U+00DC 'Ü' (extra)
-    [163] = { .data_offset = 12843, .w =   8, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   8 },   // U+00DD 'Ý' (extra)
-    [164] = { .data_offset = 12955, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   9 },   // U+00DE 'Þ' (extra)
-    [165] = { .data_offset = 13045, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // U+00DF 'ß' (extra)
-    [166] = { .data_offset = 13135, .w =   7, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00E0 'à' (extra)
-    [167] = { .data_offset = 13219, .w =   7, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00E1 'á' (extra)
-    [168] = { .data_offset = 13303, .w =   7, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00E2 'â' (extra)
-    [169] = { .data_offset = 13387, .w =   7, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   7 },   // U+00E3 'ã' (extra)
-    [170] = { .data_offset = 13464, .w =   7, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   7 },   // U+00E4 'ä' (extra)
-    [171] = { .data_offset = 13534, .w =   7, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00E5 'å' (extra)
-    [172] = { .data_offset = 13618, .w =  12, .h =   7, .offset_x =   0, .offset_y =   7, .advance =  11 },   // U+00E6 'æ' (extra)
-    [173] = { .data_offset = 13702, .w =   7, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   6 },   // U+00E7 'ç' (extra)
-    [174] = { .data_offset = 13772, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00E8 'è' (extra)
-    [175] = { .data_offset = 13868, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00E9 'é' (extra)
-    [176] = { .data_offset = 13964, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00EA 'ê' (extra)
-    [177] = { .data_offset = 14060, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   7 },   // U+00EB 'ë' (extra)
-    [178] = { .data_offset = 14140, .w =   4, .h =  12, .offset_x =  -1, .offset_y =   2, .advance =   3 },   // U+00EC 'ì' (extra)
-    [179] = { .data_offset = 14188, .w =   4, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   3 },   // U+00ED 'í' (extra)
-    [180] = { .data_offset = 14236, .w =   5, .h =  12, .offset_x =  -1, .offset_y =   2, .advance =   3 },   // U+00EE 'î' (extra)
-    [181] = { .data_offset = 14296, .w =   4, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   3 },   // U+00EF 'ï' (extra)
-    [182] = { .data_offset = 14336, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // U+00F0 'ð' (extra)
-    [183] = { .data_offset = 14416, .w =   8, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   8 },   // U+00F1 'ñ' (extra)
-    [184] = { .data_offset = 14504, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00F2 'ò' (extra)
-    [185] = { .data_offset = 14600, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00F3 'ó' (extra)
-    [186] = { .data_offset = 14696, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00F4 'ô' (extra)
-    [187] = { .data_offset = 14792, .w =   8, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   7 },   // U+00F5 'õ' (extra)
-    [188] = { .data_offset = 14880, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   7 },   // U+00F6 'ö' (extra)
-    [189] = { .data_offset = 14960, .w =   8, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   8 },   // U+00F7 '÷' (extra)
-    [190] = { .data_offset = 15032, .w =   8, .h =   9, .offset_x =   0, .offset_y =   6, .advance =   7 },   // U+00F8 'ø' (extra)
-    [191] = { .data_offset = 15104, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   8 },   // U+00F9 'ù' (extra)
-    [192] = { .data_offset = 15200, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   8 },   // U+00FA 'ú' (extra)
-    [193] = { .data_offset = 15296, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   8 },   // U+00FB 'û' (extra)
-    [194] = { .data_offset = 15392, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   8 },   // U+00FC 'ü' (extra)
-    [195] = { .data_offset = 15472, .w =   7, .h =  15, .offset_x =   0, .offset_y =   2, .advance =   7 },   // U+00FD 'ý' (extra)
-    [196] = { .data_offset = 15577, .w =   8, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   8 },   // U+00FE 'þ' (extra)
-    [197] = { .data_offset = 15681, .w =   8, .h =  13, .offset_x =  -1, .offset_y =   4, .advance =   7 },   // U+00FF 'ÿ' (extra)
+    [ 0] = { .data_offset =     0, .w =   0, .h =   0, .offset_x =   0, .offset_y =   0, .advance =   225 },   // 0x20 ' '
+    [ 1] = { .data_offset =     0, .w =   3, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   206 },   // 0x21 '!'
+    [ 2] = { .data_offset =    30, .w =   6, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   373 },   // 0x22 '"'
+    [ 3] = { .data_offset =    90, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x23 '#'
+    [ 4] = { .data_offset =   170, .w =   8, .h =  14, .offset_x =   0, .offset_y =   2, .advance =   499 },   // 0x24 '$'
+    [ 5] = { .data_offset =   282, .w =  12, .h =  12, .offset_x =   0, .offset_y =   3, .advance =   786 },   // 0x25 '%'
+    [ 6] = { .data_offset =   426, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   604 },   // 0x26 '&'
+    [ 7] = { .data_offset =   526, .w =   3, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   202 },   // 0x27 '''
+    [ 8] = { .data_offset =   556, .w =   5, .h =  14, .offset_x =   0, .offset_y =   3, .advance =   298 },   // 0x28 '('
+    [ 9] = { .data_offset =   626, .w =   5, .h =  14, .offset_x =   0, .offset_y =   3, .advance =   298 },   // 0x29 ')'
+    [10] = { .data_offset =   696, .w =   6, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   377 },   // 0x2A '*'
+    [11] = { .data_offset =   762, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   499 },   // 0x2B '+'
+    [12] = { .data_offset =   818, .w =   3, .h =   5, .offset_x =   0, .offset_y =  11, .advance =   206 },   // 0x2C ','
+    [13] = { .data_offset =   833, .w =   6, .h =   5, .offset_x =   0, .offset_y =   9, .advance =   361 },   // 0x2D '-'
+    [14] = { .data_offset =   863, .w =   3, .h =   3, .offset_x =   0, .offset_y =  11, .advance =   206 },   // 0x2E '.'
+    [15] = { .data_offset =   872, .w =   6, .h =  12, .offset_x =  -1, .offset_y =   3, .advance =   260 },   // 0x2F '/'
+    [16] = { .data_offset =   944, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x30 '0'
+    [17] = { .data_offset =  1024, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x31 '1'
+    [18] = { .data_offset =  1104, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x32 '2'
+    [19] = { .data_offset =  1184, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x33 '3'
+    [20] = { .data_offset =  1264, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x34 '4'
+    [21] = { .data_offset =  1344, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x35 '5'
+    [22] = { .data_offset =  1424, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x36 '6'
+    [23] = { .data_offset =  1504, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x37 '7'
+    [24] = { .data_offset =  1584, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x38 '8'
+    [25] = { .data_offset =  1664, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x39 '9'
+    [26] = { .data_offset =  1744, .w =   3, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   206 },   // 0x3A ':'
+    [27] = { .data_offset =  1765, .w =   3, .h =   9, .offset_x =   0, .offset_y =   7, .advance =   206 },   // 0x3B ';'
+    [28] = { .data_offset =  1792, .w =   8, .h =   8, .offset_x =   0, .offset_y =   6, .advance =   499 },   // 0x3C '<'
+    [29] = { .data_offset =  1856, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   499 },   // 0x3D '='
+    [30] = { .data_offset =  1912, .w =   8, .h =   8, .offset_x =   0, .offset_y =   6, .advance =   499 },   // 0x3E '>'
+    [31] = { .data_offset =  1976, .w =   6, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   382 },   // 0x3F '?'
+    [32] = { .data_offset =  2036, .w =  12, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   790 },   // 0x40 '@'
+    [33] = { .data_offset =  2192, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   619 },   // 0x41 'A'
+    [34] = { .data_offset =  2292, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   572 },   // 0x42 'B'
+    [35] = { .data_offset =  2382, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   566 },   // 0x43 'C'
+    [36] = { .data_offset =  2472, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   634 },   // 0x44 'D'
+    [37] = { .data_offset =  2572, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   497 },   // 0x45 'E'
+    [38] = { .data_offset =  2652, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   468 },   // 0x46 'F'
+    [39] = { .data_offset =  2732, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   612 },   // 0x47 'G'
+    [40] = { .data_offset =  2832, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   643 },   // 0x48 'H'
+    [41] = { .data_offset =  2932, .w =   4, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   235 },   // 0x49 'I'
+    [42] = { .data_offset =  2972, .w =   5, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   295 },   // 0x4A 'J'
+    [43] = { .data_offset =  3022, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   553 },   // 0x4B 'K'
+    [44] = { .data_offset =  3112, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   468 },   // 0x4C 'L'
+    [45] = { .data_offset =  3192, .w =  11, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   722 },   // 0x4D 'M'
+    [46] = { .data_offset =  3302, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   622 },   // 0x4E 'N'
+    [47] = { .data_offset =  3402, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   653 },   // 0x4F 'O'
+    [48] = { .data_offset =  3502, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   542 },   // 0x50 'P'
+    [49] = { .data_offset =  3582, .w =  10, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   653 },   // 0x51 'Q'
+    [50] = { .data_offset =  3712, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   571 },   // 0x52 'R'
+    [51] = { .data_offset =  3802, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   525 },   // 0x53 'S'
+    [52] = { .data_offset =  3882, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   517 },   // 0x54 'T'
+    [53] = { .data_offset =  3962, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   614 },   // 0x55 'U'
+    [54] = { .data_offset =  4062, .w =  10, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   593 },   // 0x56 'V'
+    [55] = { .data_offset =  4162, .w =  15, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   926 },   // 0x57 'W'
+    [56] = { .data_offset =  4312, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   559 },   // 0x58 'X'
+    [57] = { .data_offset =  4402, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   514 },   // 0x59 'Y'
+    [58] = { .data_offset =  4482, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   503 },   // 0x5A 'Z'
+    [59] = { .data_offset =  4562, .w =   5, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   295 },   // 0x5B '['
+    [60] = { .data_offset =  4627, .w =   6, .h =  12, .offset_x =  -1, .offset_y =   3, .advance =   260 },   // 0x5C '\'
+    [61] = { .data_offset =  4699, .w =   5, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   295 },   // 0x5D ']'
+    [62] = { .data_offset =  4764, .w =   8, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   499 },   // 0x5E '^'
+    [63] = { .data_offset =  4836, .w =   7, .h =   3, .offset_x =   0, .offset_y =  13, .advance =   416 },   // 0x5F '_'
+    [64] = { .data_offset =  4857, .w =   5, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   314 },   // 0x60 '`'
+    [65] = { .data_offset =  4912, .w =   7, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   455 },   // 0x61 'a'
+    [66] = { .data_offset =  4961, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x62 'b'
+    [67] = { .data_offset =  5041, .w =   7, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   393 },   // 0x63 'c'
+    [68] = { .data_offset =  5090, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // 0x64 'd'
+    [69] = { .data_offset =  5170, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   451 },   // 0x65 'e'
+    [70] = { .data_offset =  5226, .w =   6, .h =  11, .offset_x =  -1, .offset_y =   3, .advance =   303 },   // 0x66 'f'
+    [71] = { .data_offset =  5292, .w =   8, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   503 },   // 0x67 'g'
+    [72] = { .data_offset =  5372, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   487 },   // 0x68 'h'
+    [73] = { .data_offset =  5452, .w =   3, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   212 },   // 0x69 'i'
+    [74] = { .data_offset =  5482, .w =   4, .h =  13, .offset_x =  -1, .offset_y =   4, .advance =   215 },   // 0x6A 'j'
+    [75] = { .data_offset =  5534, .w =   7, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   446 },   // 0x6B 'k'
+    [76] = { .data_offset =  5604, .w =   5, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   265 },   // 0x6C 'l'
+    [77] = { .data_offset =  5654, .w =  11, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   730 },   // 0x6D 'm'
+    [78] = { .data_offset =  5731, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   487 },   // 0x6E 'n'
+    [79] = { .data_offset =  5787, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   479 },   // 0x6F 'o'
+    [80] = { .data_offset =  5843, .w =   8, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   499 },   // 0x70 'p'
+    [81] = { .data_offset =  5923, .w =   8, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   499 },   // 0x71 'q'
+    [82] = { .data_offset =  6003, .w =   6, .h =   8, .offset_x =   0, .offset_y =   6, .advance =   326 },   // 0x72 'r'
+    [83] = { .data_offset =  6051, .w =   7, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   406 },   // 0x73 's'
+    [84] = { .data_offset =  6100, .w =   6, .h =   9, .offset_x =  -1, .offset_y =   5, .advance =   319 },   // 0x74 't'
+    [85] = { .data_offset =  6154, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   482 },   // 0x75 'u'
+    [86] = { .data_offset =  6210, .w =   7, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   438 },   // 0x76 'v'
+    [87] = { .data_offset =  6259, .w =  11, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   710 },   // 0x77 'w'
+    [88] = { .data_offset =  6336, .w =   7, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   454 },   // 0x78 'x'
+    [89] = { .data_offset =  6385, .w =   7, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   438 },   // 0x79 'y'
+    [90] = { .data_offset =  6455, .w =   6, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   394 },   // 0x7A 'z'
+    [91] = { .data_offset =  6497, .w =   6, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   325 },   // 0x7B '{'
+    [92] = { .data_offset =  6575, .w =   4, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   240 },   // 0x7C '|'
+    [93] = { .data_offset =  6627, .w =   6, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   325 },   // 0x7D '}'
+    [94] = { .data_offset =  6705, .w =   8, .h =   6, .offset_x =   0, .offset_y =   8, .advance =   499 },   // 0x7E '~'
+    [95] = { .data_offset =  6753, .w =   4, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   239 },   // U+2039 '‹' (extra)
+    [96] = { .data_offset =  6781, .w =   4, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   239 },   // U+203A '›' (extra)
+    [97] = { .data_offset =  6809, .w =   3, .h =   6, .offset_x =   0, .offset_y =   8, .advance =   206 },   // U+00B7 '·' (extra)
+    [98] = { .data_offset =  6827, .w =   3, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   206 },   // U+2018 '‘' (extra)
+    [99] = { .data_offset =  6857, .w =   3, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   206 },   // U+2019 '’' (extra)
+    [100] = { .data_offset =  6887, .w =   6, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   369 },   // U+201C '“' (extra)
+    [101] = { .data_offset =  6947, .w =   6, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   369 },   // U+201D '”' (extra)
+    [102] = { .data_offset =  7007, .w =   8, .h =   5, .offset_x =  -1, .offset_y =   9, .advance =   416 },   // U+2013 '–' (extra)
+    [103] = { .data_offset =  7047, .w =  15, .h =   5, .offset_x =  -1, .offset_y =   9, .advance =   832 },   // U+2014 '—' (extra)
+    [104] = { .data_offset =  7122, .w =  10, .h =   3, .offset_x =   0, .offset_y =  11, .advance =   620 },   // U+2026 '…' (extra)
+    [105] = { .data_offset =  7152, .w =   3, .h =  11, .offset_x =   0, .offset_y =   6, .advance =   206 },   // U+00A1 '¡' (extra)
+    [106] = { .data_offset =  7185, .w =   8, .h =  11, .offset_x =   0, .offset_y =   5, .advance =   499 },   // U+00A2 '¢' (extra)
+    [107] = { .data_offset =  7273, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // U+00A3 '£' (extra)
+    [108] = { .data_offset =  7363, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   499 },   // U+00A4 '¤' (extra)
+    [109] = { .data_offset =  7419, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   499 },   // U+00A5 '¥' (extra)
+    [110] = { .data_offset =  7499, .w =   4, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   240 },   // U+00A6 '¦' (extra)
+    [111] = { .data_offset =  7551, .w =   8, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   474 },   // U+00A7 '§' (extra)
+    [112] = { .data_offset =  7655, .w =   7, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   426 },   // U+00A8 '¨' (extra)
+    [113] = { .data_offset =  7732, .w =  11, .h =  12, .offset_x =   0, .offset_y =   3, .advance =   678 },   // U+00A9 '©' (extra)
+    [114] = { .data_offset =  7864, .w =   5, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   282 },   // U+00AA 'ª' (extra)
+    [115] = { .data_offset =  7909, .w =   6, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   411 },   // U+00AB '«' (extra)
+    [116] = { .data_offset =  7951, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   499 },   // U+00AC '¬' (extra)
+    [117] = { .data_offset =  8007, .w =  11, .h =  12, .offset_x =   0, .offset_y =   3, .advance =   678 },   // U+00AE '®' (extra)
+    [118] = { .data_offset =  8139, .w =   7, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   437 },   // U+00AF '¯' (extra)
+    [119] = { .data_offset =  8216, .w =   5, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   315 },   // U+00B0 '°' (extra)
+    [120] = { .data_offset =  8271, .w =   8, .h =   8, .offset_x =   0, .offset_y =   6, .advance =   499 },   // U+00B1 '±' (extra)
+    [121] = { .data_offset =  8335, .w =   5, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   316 },   // U+00B2 '²' (extra)
+    [122] = { .data_offset =  8380, .w =   5, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   316 },   // U+00B3 '³' (extra)
+    [123] = { .data_offset =  8425, .w =   5, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   314 },   // U+00B4 '´' (extra)
+    [124] = { .data_offset =  8480, .w =   8, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   499 },   // U+00B5 'µ' (extra)
+    [125] = { .data_offset =  8560, .w =   8, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   519 },   // U+00B6 '¶' (extra)
+    [126] = { .data_offset =  8664, .w =   5, .h =   4, .offset_x =   0, .offset_y =  13, .advance =   350 },   // U+00B8 '¸' (extra)
+    [127] = { .data_offset =  8684, .w =   5, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   316 },   // U+00B9 '¹' (extra)
+    [128] = { .data_offset =  8729, .w =   6, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   294 },   // U+00BA 'º' (extra)
+    [129] = { .data_offset =  8783, .w =   6, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   411 },   // U+00BB '»' (extra)
+    [130] = { .data_offset =  8825, .w =  13, .h =  12, .offset_x =   0, .offset_y =   3, .advance =   759 },   // U+00BC '¼' (extra)
+    [131] = { .data_offset =  8981, .w =  13, .h =  12, .offset_x =   0, .offset_y =   3, .advance =   799 },   // U+00BD '½' (extra)
+    [132] = { .data_offset =  9137, .w =  12, .h =  12, .offset_x =   0, .offset_y =   3, .advance =   759 },   // U+00BE '¾' (extra)
+    [133] = { .data_offset =  9281, .w =   7, .h =  11, .offset_x =   0, .offset_y =   6, .advance =   382 },   // U+00BF '¿' (extra)
+    [134] = { .data_offset =  9358, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   619 },   // U+00C0 'À' (extra)
+    [135] = { .data_offset =  9498, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   619 },   // U+00C1 'Á' (extra)
+    [136] = { .data_offset =  9638, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   619 },   // U+00C2 'Â' (extra)
+    [137] = { .data_offset =  9778, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   619 },   // U+00C3 'Ã' (extra)
+    [138] = { .data_offset =  9918, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   619 },   // U+00C4 'Ä' (extra)
+    [139] = { .data_offset = 10058, .w =  10, .h =  15, .offset_x =   0, .offset_y =  -1, .advance =   619 },   // U+00C5 'Å' (extra)
+    [140] = { .data_offset = 10208, .w =  14, .h =  10, .offset_x =  -1, .offset_y =   4, .advance =   826 },   // U+00C6 'Æ' (extra)
+    [141] = { .data_offset = 10348, .w =   9, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   566 },   // U+00C7 'Ç' (extra)
+    [142] = { .data_offset = 10465, .w =   8, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   497 },   // U+00C8 'È' (extra)
+    [143] = { .data_offset = 10577, .w =   8, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   497 },   // U+00C9 'É' (extra)
+    [144] = { .data_offset = 10689, .w =   8, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   497 },   // U+00CA 'Ê' (extra)
+    [145] = { .data_offset = 10801, .w =   8, .h =  13, .offset_x =   0, .offset_y =   1, .advance =   497 },   // U+00CB 'Ë' (extra)
+    [146] = { .data_offset = 10905, .w =   5, .h =  14, .offset_x =  -1, .offset_y =   0, .advance =   235 },   // U+00CC 'Ì' (extra)
+    [147] = { .data_offset = 10975, .w =   4, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   235 },   // U+00CD 'Í' (extra)
+    [148] = { .data_offset = 11031, .w =   5, .h =  14, .offset_x =  -1, .offset_y =   0, .advance =   235 },   // U+00CE 'Î' (extra)
+    [149] = { .data_offset = 11101, .w =   4, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   235 },   // U+00CF 'Ï' (extra)
+    [150] = { .data_offset = 11157, .w =  11, .h =  10, .offset_x =  -1, .offset_y =   4, .advance =   634 },   // U+00D0 'Ð' (extra)
+    [151] = { .data_offset = 11267, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   622 },   // U+00D1 'Ñ' (extra)
+    [152] = { .data_offset = 11407, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   653 },   // U+00D2 'Ò' (extra)
+    [153] = { .data_offset = 11547, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   653 },   // U+00D3 'Ó' (extra)
+    [154] = { .data_offset = 11687, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   653 },   // U+00D4 'Ô' (extra)
+    [155] = { .data_offset = 11827, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   653 },   // U+00D5 'Õ' (extra)
+    [156] = { .data_offset = 11967, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   653 },   // U+00D6 'Ö' (extra)
+    [157] = { .data_offset = 12107, .w =   8, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   499 },   // U+00D7 '×' (extra)
+    [158] = { .data_offset = 12163, .w =  10, .h =  12, .offset_x =   0, .offset_y =   3, .advance =   653 },   // U+00D8 'Ø' (extra)
+    [159] = { .data_offset = 12283, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   614 },   // U+00D9 'Ù' (extra)
+    [160] = { .data_offset = 12423, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   614 },   // U+00DA 'Ú' (extra)
+    [161] = { .data_offset = 12563, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   614 },   // U+00DB 'Û' (extra)
+    [162] = { .data_offset = 12703, .w =  10, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   614 },   // U+00DC 'Ü' (extra)
+    [163] = { .data_offset = 12843, .w =   8, .h =  14, .offset_x =   0, .offset_y =   0, .advance =   514 },   // U+00DD 'Ý' (extra)
+    [164] = { .data_offset = 12955, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   545 },   // U+00DE 'Þ' (extra)
+    [165] = { .data_offset = 13045, .w =   9, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   543 },   // U+00DF 'ß' (extra)
+    [166] = { .data_offset = 13135, .w =   7, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   455 },   // U+00E0 'à' (extra)
+    [167] = { .data_offset = 13219, .w =   7, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   455 },   // U+00E1 'á' (extra)
+    [168] = { .data_offset = 13303, .w =   7, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   455 },   // U+00E2 'â' (extra)
+    [169] = { .data_offset = 13387, .w =   7, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   455 },   // U+00E3 'ã' (extra)
+    [170] = { .data_offset = 13464, .w =   7, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   455 },   // U+00E4 'ä' (extra)
+    [171] = { .data_offset = 13534, .w =   7, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   455 },   // U+00E5 'å' (extra)
+    [172] = { .data_offset = 13618, .w =  12, .h =   7, .offset_x =   0, .offset_y =   7, .advance =   720 },   // U+00E6 'æ' (extra)
+    [173] = { .data_offset = 13702, .w =   7, .h =  10, .offset_x =   0, .offset_y =   7, .advance =   393 },   // U+00E7 'ç' (extra)
+    [174] = { .data_offset = 13772, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   451 },   // U+00E8 'è' (extra)
+    [175] = { .data_offset = 13868, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   451 },   // U+00E9 'é' (extra)
+    [176] = { .data_offset = 13964, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   451 },   // U+00EA 'ê' (extra)
+    [177] = { .data_offset = 14060, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   451 },   // U+00EB 'ë' (extra)
+    [178] = { .data_offset = 14140, .w =   4, .h =  12, .offset_x =  -1, .offset_y =   2, .advance =   212 },   // U+00EC 'ì' (extra)
+    [179] = { .data_offset = 14188, .w =   4, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   212 },   // U+00ED 'í' (extra)
+    [180] = { .data_offset = 14236, .w =   5, .h =  12, .offset_x =  -1, .offset_y =   2, .advance =   212 },   // U+00EE 'î' (extra)
+    [181] = { .data_offset = 14296, .w =   4, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   212 },   // U+00EF 'ï' (extra)
+    [182] = { .data_offset = 14336, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   483 },   // U+00F0 'ð' (extra)
+    [183] = { .data_offset = 14416, .w =   8, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   487 },   // U+00F1 'ñ' (extra)
+    [184] = { .data_offset = 14504, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   479 },   // U+00F2 'ò' (extra)
+    [185] = { .data_offset = 14600, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   479 },   // U+00F3 'ó' (extra)
+    [186] = { .data_offset = 14696, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   479 },   // U+00F4 'ô' (extra)
+    [187] = { .data_offset = 14792, .w =   8, .h =  11, .offset_x =   0, .offset_y =   3, .advance =   479 },   // U+00F5 'õ' (extra)
+    [188] = { .data_offset = 14880, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   479 },   // U+00F6 'ö' (extra)
+    [189] = { .data_offset = 14960, .w =   8, .h =   9, .offset_x =   0, .offset_y =   5, .advance =   499 },   // U+00F7 '÷' (extra)
+    [190] = { .data_offset = 15032, .w =   8, .h =   9, .offset_x =   0, .offset_y =   6, .advance =   479 },   // U+00F8 'ø' (extra)
+    [191] = { .data_offset = 15104, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   482 },   // U+00F9 'ù' (extra)
+    [192] = { .data_offset = 15200, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   482 },   // U+00FA 'ú' (extra)
+    [193] = { .data_offset = 15296, .w =   8, .h =  12, .offset_x =   0, .offset_y =   2, .advance =   482 },   // U+00FB 'û' (extra)
+    [194] = { .data_offset = 15392, .w =   8, .h =  10, .offset_x =   0, .offset_y =   4, .advance =   482 },   // U+00FC 'ü' (extra)
+    [195] = { .data_offset = 15472, .w =   7, .h =  15, .offset_x =   0, .offset_y =   2, .advance =   438 },   // U+00FD 'ý' (extra)
+    [196] = { .data_offset = 15577, .w =   8, .h =  13, .offset_x =   0, .offset_y =   4, .advance =   499 },   // U+00FE 'þ' (extra)
+    [197] = { .data_offset = 15681, .w =   8, .h =  13, .offset_x =  -1, .offset_y =   4, .advance =   438 },   // U+00FF 'ÿ' (extra)
 };
 
 const atlas_t NUNITO_BOLD_13 = {
