@@ -3,14 +3,17 @@
  * core/kernel/config.c — persistent settings in a pre-allocated file.
  *
  * =========================================================================
- * *** THE WRITE PATH BELOW IS UNVERIFIED ON HARDWARE. ***
+ * *** THE WRITE PATH BELOW IS PROVEN ON HARDWARE (2026-07-27). ***
  *
- * ata_write_sectors() has never touched a real drive, and this is the first
- * and only caller of it. Until somebody proves it on device, assume it is
- * wrong.
+ * The bring-up procedure below was run end to end on the 5.5G: the resolved
+ * LBA was confirmed three ways before any write, slot alternation was read
+ * back off the raw disk, and `fsck.vfat -n` reported the volume clean
+ * afterwards. The procedure is KEPT — not as a warning, but because it is the
+ * only way to re-qualify this path after a change to fat32_file_lba(),
+ * ata_write_sectors(), the record layout or the host tool. Run it again if you
+ * touch any of those.
  *
- * FIRST ON-DEVICE TEST — do it in this order, on a disk you can afford to
- * lose:
+ * ON-DEVICE TEST — do it in this order, on a disk you can afford to lose:
  *
  *   1. Use a SCRATCH iPod disk (or a disk image restored from a backup you
  *      have actually verified restores). Do NOT do the first write on a disk
@@ -116,11 +119,16 @@ static uint32_t g_slot_buf[CONFIG_SLOT_BYTES / 4u];
  *
  *   off   size  field
  *   0     4     magic     'C''O''R''E'
- *   4     2     version   layout version (1)
+ *   4     2     version   layout version (see CONFIG_VERSION)
  *   6     2     length    meaningful payload bytes that follow
  *   8     4     seq       monotonic write counter (wrapping)
  *   12    N     payload   packed settings fields, zero-padded
  *   1020  4     crc32     CRC-32 over bytes [0 .. 1020) — EVERYTHING above
+ *
+ * `length` — not `version` — is what says how much payload to read. Version
+ * gates whether we understand the record at all; length gates which fields are
+ * present inside one we do. That is what lets a v1 record (length 12) keep
+ * working under a v2 decoder without a migration step.
  *
  * The CRC covering the HEADER (not just the payload) is deliberate: seq is
  * what decides which slot wins, so a corrupt seq with a valid payload CRC
@@ -146,6 +154,27 @@ enum {
     P_BASS, P_TREBLE, P_BALANCE, P_BL_SECS, P_BL_BRIGHT, P_THEME, P_CLICKER,
     CFG_PAYLOAD_V1        /* = 12 */
 };
+
+/*
+ * Payload v2 APPENDS the resume locator. Written as explicit offsets rather
+ * than more enum members because these are 32-bit fields, and because "one
+ * enumerator, one byte" stops being true the moment a field is wider than a
+ * byte — a silent way to shift every offset after it.
+ *
+ * Nothing before CFG_PAYLOAD_V1 moves, which is what makes a v1 record on a
+ * user's disk still readable: `length` says 12, the three fields below are
+ * simply not there, and decode reports "no resume".
+ */
+#define P_RES_HASH      (CFG_PAYLOAD_V1 + 0u)    /* 12: name_hash of the file */
+#define P_RES_SECS      (CFG_PAYLOAD_V1 + 4u)    /* 16: elapsed seconds       */
+#define P_RES_TOTAL     (CFG_PAYLOAD_V1 + 8u)    /* 20: track length          */
+#define CFG_PAYLOAD_V2  (CFG_PAYLOAD_V1 + 12u)   /* = 24                      */
+
+/* Ceiling for both stored second counts. A day is already absurd for one
+ * track; the point is that a CRC-valid but insane record cannot hand the
+ * player a seek target built from garbage. (player_seek_to clamps to the real
+ * track length as well — this is the belt to that pair of braces.) */
+#define CFG_RESUME_SECS_MAX  86400u
 
 /* ---- little-endian helpers --------------------------------------------- */
 
@@ -209,6 +238,13 @@ static int clampi(int v, int lo, int hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+/* Unsigned ceiling clamp (the resume second-counts, which have no lower
+ * bound to enforce). */
+static uint32_t clampu(uint32_t v, uint32_t hi)
+{
+    return v > hi ? hi : v;
+}
+
 /* backlight_secs is a discrete set, not a range: snap to the nearest legal
  * value rather than clamping, so a bogus 7 becomes 5 and not 7. */
 static int clamp_bl_secs(int v)
@@ -233,7 +269,7 @@ void config_encode(uint8_t *rec, const settings_t *s, uint32_t seq)
 
     wr32(&rec[CFG_OFF_MAGIC],   CFG_MAGIC);
     wr16(&rec[CFG_OFF_VERSION], (uint16_t)CONFIG_VERSION);
-    wr16(&rec[CFG_OFF_LENGTH],  (uint16_t)CFG_PAYLOAD_V1);
+    wr16(&rec[CFG_OFF_LENGTH],  (uint16_t)CFG_PAYLOAD_V2);
     wr32(&rec[CFG_OFF_SEQ],     seq);
 
     uint8_t *p = &rec[CFG_OFF_PAYLOAD];
@@ -249,6 +285,16 @@ void config_encode(uint8_t *rec, const settings_t *s, uint32_t seq)
     p[P_BL_BRIGHT] = (uint8_t)clampi(s->backlight_bright, 1, 32);
     p[P_THEME]     = (uint8_t)clampi(s->theme,   0, 3);
     p[P_CLICKER]   = (uint8_t)clampi(s->clicker, 0, 3);
+
+    /* v2: the resume locator. Hash 0 means "nothing to resume", so the two
+     * second-counts are forced to 0 with it — the record can never carry a
+     * position that belongs to no track. */
+    uint32_t rh = s->resume_hash;
+    uint32_t rs = rh ? clampu(s->resume_secs,  CFG_RESUME_SECS_MAX) : 0u;
+    uint32_t rt = rh ? clampu(s->resume_total, CFG_RESUME_SECS_MAX) : 0u;
+    wr32(&p[P_RES_HASH],  rh);
+    wr32(&p[P_RES_SECS],  rs);
+    wr32(&p[P_RES_TOTAL], rt);
 
     wr32(&rec[CFG_OFF_CRC], crc32_buf(rec, CFG_OFF_CRC));
 }
@@ -266,7 +312,7 @@ int config_decode(const uint8_t *rec, settings_t *s, uint32_t *seq)
     /* Version 0 is not a version; anything newer than we understand is a
      * record written by a future build whose payload we cannot interpret
      * field-for-field, so we decline rather than guess. (Forward compat runs
-     * the other way: a v1 record stays readable by v2+ because `length` says
+     * the other way: a v1 record stays readable here because `length` says
      * how much of the payload v1 defined.) */
     if (ver == 0 || ver > CONFIG_VERSION) {
         return 0;
@@ -296,6 +342,27 @@ int config_decode(const uint8_t *rec, settings_t *s, uint32_t *seq)
     s->backlight_bright  = clampi(p[P_BL_BRIGHT], 1, 32);
     s->theme             = clampi(p[P_THEME],   0, 3);
     s->clicker           = clampi(p[P_CLICKER], 0, 3);
+
+    /*
+     * The v2 tail, gated on the record's own `length` — so the v1 record
+     * sitting on the device right now decodes as "no resume" rather than
+     * reading three 32-bit fields out of the zero padding by accident. Always
+     * WRITTEN, never left at whatever the caller's defaults held, because a
+     * half-populated locator is exactly how you resume into the wrong track.
+     */
+    if (len >= CFG_PAYLOAD_V2) {
+        s->resume_hash  = rd32(&p[P_RES_HASH]);
+        s->resume_secs  = clampu(rd32(&p[P_RES_SECS]),  CFG_RESUME_SECS_MAX);
+        s->resume_total = clampu(rd32(&p[P_RES_TOTAL]), CFG_RESUME_SECS_MAX);
+    } else {
+        s->resume_hash  = 0;
+        s->resume_secs  = 0;
+        s->resume_total = 0;
+    }
+    if (s->resume_hash == 0) {
+        s->resume_secs  = 0;         /* no track => no position (encode's rule, */
+        s->resume_total = 0;         /* re-asserted against a hand-edited file) */
+    }
 
     *seq = rd32(&rec[CFG_OFF_SEQ]);
     return 1;

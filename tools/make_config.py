@@ -76,7 +76,7 @@ SLOTS = 2
 MIN_BYTES = SLOT_BYTES * SLOTS    # 2048 — the smallest file the device accepts
 
 MAGIC = 0x45524F43                # 'C''O''R''E' little-endian
-VERSION = 1
+VERSION = 2                       # v1 = settings only; v2 adds the resume locator
 
 OFF_MAGIC, OFF_VERSION, OFF_LENGTH, OFF_SEQ, OFF_PAYLOAD = 0, 4, 6, 8, 12
 OFF_CRC = SLOT_BYTES - 4          # 1020; the CRC covers bytes [0, OFF_CRC)
@@ -97,7 +97,16 @@ PAYLOAD_FIELDS = [
     ("theme",             0),
     ("clicker",           1),
 ]
-PAYLOAD_LEN = len(PAYLOAD_FIELDS)  # 12
+PAYLOAD_V1_LEN = len(PAYLOAD_FIELDS)  # 12
+
+# Payload v2 appends the resume locator: three 32-bit LE fields, no v1 offset
+# moved. Mirrors P_RES_* in config.c.
+#   resume_hash   name_hash() of the playing track's ext-trimmed filename
+#   resume_secs   elapsed seconds within it
+#   resume_total  its length, kept as a cross-check against a same-named track
+# A fresh file has nothing to resume, so all three are written as 0.
+RESUME_FIELDS = ["resume_hash", "resume_secs", "resume_total"]
+PAYLOAD_LEN = PAYLOAD_V1_LEN + 4 * len(RESUME_FIELDS)   # 24
 
 SIGNED = {"bass", "treble", "balance"}
 
@@ -123,6 +132,9 @@ def encode(values: dict, seq: int) -> bytes:
             struct.pack_into("<b", rec, OFF_PAYLOAD + i, max(-128, min(127, v)))
         else:
             struct.pack_into("<B", rec, OFF_PAYLOAD + i, max(0, min(255, v)))
+    for j, name in enumerate(RESUME_FIELDS):
+        v = int(values.get(name, 0)) & 0xFFFFFFFF
+        struct.pack_into("<I", rec, OFF_PAYLOAD + PAYLOAD_V1_LEN + 4 * j, v)
     struct.pack_into("<I", rec, OFF_CRC, crc32(bytes(rec[:OFF_CRC])))
     return bytes(rec)
 
@@ -137,7 +149,7 @@ def decode(rec: bytes):
     if ver == 0 or ver > VERSION:
         return None
     length = struct.unpack_from("<H", rec, OFF_LENGTH)[0]
-    if length < PAYLOAD_LEN or length > OFF_CRC - OFF_PAYLOAD:
+    if length < PAYLOAD_V1_LEN or length > OFF_CRC - OFF_PAYLOAD:
         return None
     if crc32(bytes(rec[:OFF_CRC])) != struct.unpack_from("<I", rec, OFF_CRC)[0]:
         return None
@@ -146,6 +158,13 @@ def decode(rec: bytes):
     for i, (name, _d) in enumerate(PAYLOAD_FIELDS):
         fmt = "<b" if name in SIGNED else "<B"
         out[name] = struct.unpack_from(fmt, rec, OFF_PAYLOAD + i)[0]
+    # The v2 tail is gated on the record's own `length`, exactly as
+    # config_decode() gates it — so a v1 record (length 12) still verifies
+    # here instead of being read out of the zero padding.
+    if length >= PAYLOAD_LEN:
+        for j, name in enumerate(RESUME_FIELDS):
+            out[name] = struct.unpack_from(
+                "<I", rec, OFF_PAYLOAD + PAYLOAD_V1_LEN + 4 * j)[0]
     return seq, out
 
 

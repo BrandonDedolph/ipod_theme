@@ -21,9 +21,10 @@
  *
  * FUNCTIONAL fields drive real hardware once main.c wires them: shuffle, repeat
  * (player), volume (mirrors hal_volume), backlight_secs + backlight_bright
- * (backlight HAL). COSMETIC fields render + store but nothing consumes them yet
- * (crossfade, resume_on_startup, bass, treble, balance, theme>0) — flagged at
- * their declarations below.
+ * (backlight HAL), resume_on_startup (kernel/main.c re-opens the saved track at
+ * boot). COSMETIC fields render + store but nothing consumes them yet
+ * (crossfade, bass, treble, balance, theme>0) — flagged at their declarations
+ * below.
  *
  * Freestanding: integer-only, no libc/libm/malloc, no allocation. The model
  * half (settings.c) has no hardware or framebuffer dependency at all, so it
@@ -46,7 +47,7 @@ typedef enum { REPEAT_OFF, REPEAT_ALL, REPEAT_ONE } repeat_mode_t;
 typedef struct {
     int  shuffle;            /* 0/1 — FUNCTIONAL (player queue order)          */
     repeat_mode_t repeat;    /* FUNCTIONAL (player auto-advance)               */
-    int  resume_on_startup;  /* 0/1 — COSMETIC for now                        */
+    int  resume_on_startup;  /* 0/1 — FUNCTIONAL (boot re-opens the last track)*/
     int  crossfade;          /* 0/1 — COSMETIC (no crossfade mixer yet)       */
     int  volume;             /* 0..100 — FUNCTIONAL (mirrors hal_volume)      */
     int  bass, treble;       /* -12..12 dB — COSMETIC (no EQ wired yet)       */
@@ -55,6 +56,29 @@ typedef struct {
     int  backlight_bright;   /* 1..32 — FUNCTIONAL                            */
     int  theme;              /* 0..3; only 0 (Linen) renders — COSMETIC >0    */
     int  clicker;            /* 0/1 — FUNCTIONAL (piezo click on navigation)  */
+
+    /*
+     * RESUME LOCATOR — runtime state, not a user preference. No Settings row
+     * shows these and settings_activate() never touches them; they ride along
+     * in settings_t only because kernel/config.c's record is the one thing on
+     * this device that survives a power cut, and a second record would mean a
+     * second write.
+     *
+     * resume_hash is the case/quote-folded name_hash() of the playing track's
+     * EXT-TRIMMED filename — a NAME, deliberately, because a queue index or a
+     * cluster stops meaning anything the moment the library is rebuilt or the
+     * disk is re-imported, while the filename survives both. 0 = nothing to
+     * resume, and the codec enforces that (hash 0 zeroes the other two).
+     *
+     * resume_total is the track length as the decoder reported it, kept purely
+     * as a CROSS-CHECK: filenames like "01 Intro" repeat across a library, so
+     * the restore only trusts a name match that the duration also agrees with
+     * (or a name that is unique). Resuming the wrong track is worse than not
+     * resuming, so the ambiguous case declines.
+     */
+    uint32_t resume_hash;    /* name_hash of the track filename; 0 = none     */
+    uint32_t resume_secs;    /* elapsed seconds within that track             */
+    uint32_t resume_total;   /* that track's length, as a sanity cross-check  */
 } settings_t;
 
 /* Populate `s` with sensible defaults (shuffle off, repeat off, volume 70,

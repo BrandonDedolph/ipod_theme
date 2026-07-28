@@ -41,6 +41,12 @@ int main(void)
     check("def-bl-bright", s.backlight_bright == 32);
     check("def-theme",     s.theme == 0);
     check("def-bass-0",    s.bass == 0 && s.treble == 0 && s.balance == 0);
+    check("def-resume-on",  s.resume_on_startup == 1);
+    /* A fresh (or freshly Reset) settings_t must carry NO resume locator —
+     * "Reset Settings" routes through settings_defaults, so this is also what
+     * makes a reset forget where you were. */
+    check("def-resume-cleared",
+          s.resume_hash == 0 && s.resume_secs == 0 && s.resume_total == 0);
 
     /* --- Test 2: activate() toggles Shuffle --- */
     check("shuffle-0", s.shuffle == 0);
@@ -58,6 +64,27 @@ int main(void)
     check("repeat-one", s.repeat == REPEAT_ONE);
     settings_activate(SETTINGS_PLAYBACK, &s, 1);
     check("repeat-wrap-off", s.repeat == REPEAT_OFF);
+
+    /* --- Test 3b: activate() toggles Resume (row 2 of Playback) ---
+     * The row was pulled from this screen while nothing could persist the
+     * setting; it is back, and it is the switch that gates the whole boot
+     * restore, so a silent regression to a 2-row Playback screen would make
+     * the feature unreachable. */
+    settings_defaults(&s);
+    check("resume-on", s.resume_on_startup == 1);
+    check("act-resume-none",
+          settings_activate(SETTINGS_PLAYBACK, &s, 2) == SETTINGS_ACTION_NONE);
+    check("resume-off", s.resume_on_startup == 0);
+    settings_activate(SETTINGS_PLAYBACK, &s, 2);
+    check("resume-back-on", s.resume_on_startup == 1);
+    /* Toggling the SETTING must not disturb the stored locator — main.c owns
+     * clearing that, and doing it here too would mean the pure model quietly
+     * discarding state the caller had just loaded off disk. */
+    s.resume_hash = 0xABCD1234u; s.resume_secs = 77; s.resume_total = 240;
+    settings_activate(SETTINGS_PLAYBACK, &s, 2);
+    check("resume-toggle-keeps-locator",
+          s.resume_on_startup == 0 && s.resume_hash == 0xABCD1234u &&
+          s.resume_secs == 77 && s.resume_total == 240);
 
     /* --- Test 4: Balance adjust clamps to [-100,100] --- */
     settings_defaults(&s);
@@ -139,7 +166,7 @@ int main(void)
 
     /* --- Test 11: counts + generic value/kind reporting --- */
     check("count-root",  settings_count(SETTINGS_ROOT) == 8);
-    check("count-play",  settings_count(SETTINGS_PLAYBACK) == 2);
+    check("count-play",  settings_count(SETTINGS_PLAYBACK) == 3);
     check("count-sound", settings_count(SETTINGS_SOUND) == 4);
     check("count-theme", settings_count(SETTINGS_THEME) == 2);
 
@@ -167,6 +194,20 @@ int main(void)
               buf[0] == 'O' && buf[1] == 'f' && buf[2] == 'f');
         check("repeat-kind-select",
               settings_kind(SETTINGS_PLAYBACK, 1) == SETTINGS_KIND_SELECT);
+
+        /* Resume renders its state as a right-hand On/Off value, and has a
+         * label — an unlabelled row is an invisible one. */
+        settings_value(SETTINGS_PLAYBACK, &s, 2, buf, &is_toggle, &on,
+                       &num, &den);
+        check("resume-text-on",
+              buf[0] == 'O' && buf[1] == 'n' && buf[2] == '\0');
+        s.resume_on_startup = 0;
+        settings_value(SETTINGS_PLAYBACK, &s, 2, buf, &is_toggle, &on,
+                       &num, &den);
+        check("resume-text-off",
+              buf[0] == 'O' && buf[1] == 'f' && buf[2] == 'f');
+        check("resume-label",
+              settings_label(SETTINGS_PLAYBACK, 2)[0] == 'R');
     }
 
     printf("settings_test: %s\n", g_fail ? "FAIL" : "OK");

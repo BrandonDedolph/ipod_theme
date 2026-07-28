@@ -127,7 +127,10 @@ static const char *const ROOT_L[8] = {
     "Playback", "Sound", "Theme", "Display", "Clicker", "About",
     "Disk Mode", "Reset Settings",
 };
-static const char *const PLAY_L[2] = { "Shuffle", "Repeat" };
+/* Resume is back on this list: it was pulled with the other placeholders while
+ * nothing could persist it, and it is now the switch that decides whether boot
+ * re-opens the track you left off on (kernel/main.c resume_restore). */
+static const char *const PLAY_L[3] = { "Shuffle", "Repeat", "Resume" };
 static const char *const SOUND_L[4] = { "Volume", "Bass", "Treble", "Balance" };
 static const char *const DISP_L[2] = { "Backlight", "Brightness" };
 static const char *const THEME_L[2] = { "Linen", "Onyx" };
@@ -155,13 +158,18 @@ void settings_defaults(settings_t *s)
     s->backlight_bright  = 32;
     s->theme             = 0;
     s->clicker           = 1;
+    /* Nothing to resume from a fresh install — and "Reset Settings" routes
+     * through here too, so it also forgets where you were. */
+    s->resume_hash       = 0;
+    s->resume_secs       = 0;
+    s->resume_total      = 0;
 }
 
 int settings_count(int screen)
 {
     switch (screen) {
     case SETTINGS_ROOT:     return 8;
-    case SETTINGS_PLAYBACK: return 2;
+    case SETTINGS_PLAYBACK: return 3;
     case SETTINGS_SOUND:    return 4;
     case SETTINGS_DISPLAY:  return 2;
     case SETTINGS_ABOUT:    return 1;   /* non-interactive info page */
@@ -258,6 +266,7 @@ void settings_value(int screen, const settings_t *s, int idx,
         case 0: scopy(buf, s->shuffle ? "On" : "Off"); break;
         case 1: scopy(buf, s->repeat == REPEAT_OFF ? "Off"
                          : s->repeat == REPEAT_ALL ? "All" : "One"); break;
+        case 2: scopy(buf, s->resume_on_startup ? "On" : "Off"); break;
         default: break;
         }
         break;
@@ -314,6 +323,11 @@ int settings_activate(int screen, settings_t *s, int idx)
         switch (idx) {
         case 0: s->shuffle = !s->shuffle; break;
         case 1: s->repeat = (repeat_mode_t)((s->repeat + 1) % 3); break;
+        /* Turning Resume OFF does not clear the stored locator here — this
+         * module is pure, and main.c owns that (it drops it on the next pass,
+         * so the record on disk stops carrying a position you asked it to
+         * forget). */
+        case 2: s->resume_on_startup = !s->resume_on_startup; break;
         default: break;
         }
         return SETTINGS_ACTION_NONE;
