@@ -169,10 +169,16 @@ void        player_jump(int i);
 
 /* Manual track skip (Prev/Next buttons). player_prev restarts the current track
  * if >~3s in, else goes to the previous, wrapping to the last entry.
- * player_next is a NO-OP on the last track unless Repeat All is on (it used to
- * tear playback down before discovering there was no successor, which left the
- * whole transport inactive and therefore dead). Both ignore Repeat-One, and
- * both leave a paused player paused at the new track. */
+ * player_next on the LAST track (Repeat off) ENDS playback deliberately — the
+ * queue is finished, exactly as if it had played out, and player_end_seq()
+ * counts it as such. It was previously a no-op there, which was an
+ * overcorrection: the original bug was tearing the transport down BEFORE
+ * establishing there was no successor, leaving the player inactive with every
+ * UI transport gated on player_active(). Picking the successor first is what
+ * fixed that; doing nothing merely made the button dead.
+ *
+ * Both ignore Repeat-One, and both leave a paused player paused at the new
+ * track. */
 void        player_next(void);
 void        player_prev(void);
 

@@ -250,22 +250,36 @@ int main(void)
           player_queue_current() == 3);
 
     /*
-     * Next at the tail with Repeat OFF is a NO-OP: it must neither wrap nor
-     * tear playback down. player_next() used to stop the DAC and clear
-     * g_pl_active BEFORE looking for a successor, so pressing Next on the last
-     * track of an album killed the transport outright — every handler is gated
-     * on player_active(), so Play, Prev and Next all went permanently dead with
-     * no way back into the queue. A real iPod ignores the press; so do we.
+     * Next at the tail with Repeat OFF ENDS the queue: the user asked to leave
+     * the last track and there is nowhere to go, so playback finishes exactly
+     * as if it had played out. It must NOT wrap.
+     *
+     * This assertion previously demanded the opposite ("keeps playing"), which
+     * encoded an overcorrection rather than the intent. The original bug was
+     * that player_next() stopped the DAC and cleared g_pl_active BEFORE
+     * looking for a successor, so Next on the last track killed the transport
+     * with every handler gated on player_active() — no way back into the
+     * queue. Choosing the successor first is what fixed that. Making the press
+     * do nothing at all was a separate mistake: on device the button was
+     * simply dead on the final track (reported 2026-07-27).
+     *
+     * Ending here is safe precisely because we only reach it having already
+     * established there is no next track, and it routes through the same
+     * end-of-queue signal, so the UI tears down the dead player views and
+     * drops the saved resume position.
      */
     stub_reset();
     player_set_repeat(0);
     make_entries(ents, 3, 0);
     player_play_queue(ents, 3, 2, 0, 0);
+    uint32_t end_before = player_end_seq();
     player_next();
-    xpect(&c, "next past the last entry with repeat off keeps playing",
-          player_active() == 1 && player_queue_current() == 2);
-    xpect(&c, "next past the last entry leaves the transport usable",
-          (player_prev(), player_active() == 1));
+    xpect(&c, "next past the last entry with repeat off ends playback",
+          player_active() == 0);
+    xpect(&c, "next past the last entry counts as the queue ending",
+          player_end_seq() == end_before + 1);
+    xpect(&c, "next past the last entry does NOT wrap to the first",
+          player_queue_current() == 2);
 
     /* ...and with Repeat ALL it wraps. */
     stub_reset();

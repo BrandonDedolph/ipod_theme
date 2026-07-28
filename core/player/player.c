@@ -1226,7 +1226,27 @@ void player_next(void)
     int nxt = g_shuffle ? queue_random_playable(g_queue_idx)
                         : next_playable(g_queue_idx);
     if (nxt < 0) {
-        return;                          /* past the last: leave playback alone */
+        /*
+         * Past the last track with Repeat off. This used to return and leave
+         * playback running, which is the overcorrection for an older bug: the
+         * ORIGINAL fault was tearing the transport down BEFORE discovering
+         * there was no successor, which left the player permanently inactive
+         * with every UI transport gated on player_active(). Choosing the
+         * successor first fixed that — but then doing nothing at all meant
+         * Next on the final track was simply dead to the user.
+         *
+         * Ending deliberately is the right behaviour and is safe now, because
+         * we only get here having already established there is no next track.
+         * Bumping the end counter (rather than just stopping) routes this
+         * through exactly the same path as a queue that ran out on its own:
+         * the UI closes the codec, leaves the dead player views, and drops the
+         * saved resume position.
+         */
+        hal_audio_stop();
+        g_pl_active = 0;
+        g_pl_paused = 0;
+        g_pl_end_seq++;
+        return;
     }
     int was_paused = g_pl_paused;
     hal_audio_stop();
