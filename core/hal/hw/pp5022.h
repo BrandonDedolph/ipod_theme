@@ -398,6 +398,12 @@
 #define GPIOD_ENABLE_ADDR     0x6000D00C
 #define GPIOD_OUTPUT_EN_ADDR  0x6000D01C
 #define GPIOD_OUTPUT_VAL_ADDR 0x6000D02C
+/* Port A OUTPUT_VAL, for the LTC4066 charge-current gate (HPWR, bit 0x04 —
+ * 06-power.md "Charge current control"). Derived from the bank layout above
+ * and anchored by GPIOA_INPUT_VAL @0x6000D030 further down: A-D base
+ * 0x6000D000, port A at +0x00, OUTPUT_VAL is the +0x20 group. */
+#define GPIOA_OUTPUT_VAL_ADDR 0x6000D020
+
 #define GPIOL_ENABLE_ADDR     0x6000D10C
 #define GPIOL_OUTPUT_EN_ADDR  0x6000D11C
 #define GPIOL_OUTPUT_VAL_ADDR 0x6000D12C

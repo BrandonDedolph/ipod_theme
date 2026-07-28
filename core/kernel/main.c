@@ -3756,6 +3756,10 @@ static void suspend_to_ram(uint32_t play_down_us)
      * never wake the device again (battery pull, dead cell). Forced, so a
      * change made 1 s ago is not lost to the debounce. */
     settings_commit(1);
+    cpu_unboost();                        /* the boost refcount is >=1 here (we are
+                                           * entered from BL_FULL), so without this
+                                           * the "sleeping" device holds the 80 MHz
+                                           * operating point for the whole suspend */
     ata_standby();                        /* spin the platters down (quiet, low-power) */
     /* Clear to black BEFORE cutting the backlight, so the transflective panel
      * doesn't faintly ghost the last UI in ambient light while asleep. Wake
@@ -3786,6 +3790,12 @@ static void suspend_to_ram(uint32_t play_down_us)
     }
     while (clickwheel_get_event(&drain)) { }
 
+    /* Re-boost BEFORE the drive and the repaint: cpu_boost/cpu_unboost are
+     * refcounted, so this pairs with the unboost on the way in and keeps the
+     * count balanced (an unmatched unboost would drive it negative the next
+     * time the idle path unboosts). It also puts the ATA read and the render
+     * back at 80 MHz, which is where their timing was calibrated. */
+    cpu_boost();
     ata_wakeup();                         /* spin the drive back up before any read */
     paint_current_screen();               /* render the real screen while dark... */
     lcd_present_fb(console_framebuffer());
@@ -3832,6 +3842,7 @@ _Noreturn static void run_ui(fat32_t *fs)
 {
     clickwheel_init();
     player_init(fs);
+    charger_set_max_current(500);     /* LTC4066 HPWR: 100 mA cap until asserted */
     chip_placeholder_init();
     artcache_init();                  /* ways must start at key -1; .bss gives 0,
                                        * which is album 0's real index */

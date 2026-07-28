@@ -60,4 +60,16 @@ int power_is_external(void);
  */
 int power_is_charging(void);
 
+/*
+ * Tell the LTC4066 how much input current it may draw (06-power.md, "Charge
+ * current control"). 500 => HPWR asserted, the charger may pull up to 500 mA;
+ * anything less => the 100 mA default cap. The charger is otherwise autonomous
+ * (CV/CC, fast/trickle, end-of-charge are all internal) — this is the only
+ * charge knob the firmware has.
+ *
+ * Deliberately never raises SUSP: a latched SUSP high is "the iPod silently
+ * refuses to charge", and we have no feature that needs zero-current mode.
+ */
+void charger_set_max_current(int milliamps);
+
 #endif /* CORE_HAL_HW_BATTERY_H */

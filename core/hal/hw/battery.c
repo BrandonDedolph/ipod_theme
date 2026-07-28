@@ -225,3 +225,44 @@ int power_is_charging(void)
     uint32_t b = mmio_read32(GPIOB_INPUT_VAL_ADDR);
     return (b & POWER_CHARGING_BIT) == 0;         /* active-low */
 }
+
+/* ---------- Charge-current gate (LTC4066) ----------------------------
+ * 06-power.md, "Charge current control": the charger is autonomous and the
+ * firmware can only gate it with two GPIO outputs.
+ *   HPWR = GPIOA_OUTPUT_VAL bit 0x04 — high = 500 mA permitted, low = 100 mA
+ *   SUSP = GPIOL_OUTPUT_VAL bit 0x04 — high = suspend ALL charging
+ *
+ * Nothing in this firmware ever wrote either bit, so we inherited whatever the
+ * boot ROM left — i.e. the 100 mA cap. Since the LTC4066 is a LINEAR charger,
+ * system load and battery charge share that input budget: at ~24 mA idle plus
+ * ~20 mA of backlight the cell was seeing well under half of it, and during
+ * playback with disk spin-ups the draw can exceed 100 mA outright, so the
+ * battery DISCHARGES while nominally charging.
+ *
+ * Writes go through the atomic +GPIO_BITWISE_OFFSET alias (one masked 32-bit
+ * write, no read-modify-write), so this cannot race the backlight driver's
+ * unrelated GPIOL bit.
+ *
+ * SPEC NOTE: 500 mA without USB enumeration is out of spec for a PC port — we
+ * have no USB stack, so we can never be *entitled* to it. The hardware does not
+ * interlock the two (HPWR is a dumb current-limit select), and this is exactly
+ * what Apple's own firmware asserts after it negotiates. Safe on wall chargers
+ * and on essentially all PC root ports; a strictly limited hub port may fold
+ * back until replug.
+ *
+ * UNVERIFIED ON HARDWARE — confirm with an inline USB current meter, and read
+ * GPIOA_INPUT_VAL bit 2 back to check the write sticks.
+ */
+#define CHG_HPWR_BIT  0x04
+#define CHG_SUSP_BIT  0x04
+
+void charger_set_max_current(int milliamps)
+{
+    /* SUSP low in both cases: never suspend charging. */
+    mmio_write32(GPIOL_OUTPUT_VAL_ADDR + GPIO_BITWISE_OFFSET,
+                 (uint32_t)CHG_SUSP_BIT << 8);
+    mmio_write32(GPIOA_OUTPUT_VAL_ADDR + GPIO_BITWISE_OFFSET,
+                 (milliamps >= 500)
+                     ? (((uint32_t)CHG_HPWR_BIT << 8) | CHG_HPWR_BIT)
+                     : ((uint32_t)CHG_HPWR_BIT << 8));
+}
