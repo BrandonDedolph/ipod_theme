@@ -30,6 +30,9 @@
 #define CHG_RED     0xDA46u      /* low-battery fill (oklch(0.65 0.18 30))   */
 #define CHG_TEXT    0xEF3Bu      /* #e8e4dd big percent digits               */
 #define CHG_UNIT    0xACF2u      /* #a89e92 muted "%" unit                   */
+/* At or above this, a stopped charger means "full", not "failed". */
+#define CHG_FULL_PCT 90
+
 #define CHG_MUTED   0x7B8Du      /* #7a736a muted status / "not charging"    */
 
 /* Battery geometry. Centred horizontally: body 150 wide -> the panel centre
@@ -207,6 +210,21 @@ void screen_charging_render(int pct, int charging, int external)
     } else if (!external) {
         status = "CONNECT CABLE";
         status_ink = CHG_MUTED;
+    } else if (pct >= CHG_FULL_PCT) {
+        /*
+         * Cable in, charger has STOPPED, battery high: that is the LTC4066
+         * terminating a completed charge, not a fault. It manages CV taper and
+         * end-of-charge itself (06-power.md, "Charge current control"), so this
+         * is the normal, healthy end state — reporting it as "NOT CHARGING"
+         * read like something had gone wrong.
+         *
+         * Threshold not a precise measurement: battery.h warns the percent
+         * curve is uncalibrated and cosmetic until checked against a real (and
+         * usually replacement) cell. It only has to separate "topped off" from
+         * "plugged in but not charging", which is a wide gap.
+         */
+        status = "CHARGED";
+        status_ink = CHG_GREEN;
     } else {
         status = "NOT CHARGING";
         status_ink = CHG_MUTED;
