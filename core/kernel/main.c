@@ -5311,6 +5311,31 @@ _Noreturn void kernel_main(void) {
     uart_put_hex32(current_tick());
     uart_puts(" (post-sleep, ~+10)\n");
 
+    /*
+     * Backlight FIRST — before the LCD probe, deliberately.
+     *
+     * It used to live inside the lcd_init() block, which made it invisible
+     * whether a dark panel meant "our code never ran" or "our code ran and
+     * lcd_init() failed". Chainloaded from ipodloader2 that never mattered:
+     * the loader draws its own menu, so it has already lit the backlight and
+     * brought the BCM up before handing off. Booting DIRECTLY from the
+     * firmware partition, nobody has — and a cold-BCM lcd_init() failure
+     * skipped the backlight, the disk and the UI in one go, which is
+     * indistinguishable from a crash in crt0 (2026-07-26: black screen, cause
+     * undiagnosable for exactly this reason).
+     *
+     * Nothing here depends on the LCD: backlight_init() is GPIO B/D/L only
+     * (charge pump, step line, LED enable) and its delay loops self-scale to
+     * the live core clock via cpu_frequency(), whose 30 MHz calibration point
+     * is precisely where we are now — before cpu_boost(), not after.
+     *
+     * Cost: the panel is lit for the duration of lcd_init() (up to ~500 ms of
+     * BCM bring-up) before boot_splash() paints, so a cold boot can show a
+     * brief bright field. That is the price of being able to see a boot at
+     * all, and it is one line to put back.
+     */
+    backlight_init();
+
     /* LCD probe gates the whole disk/audio/UI stack: nonzero BCM power => real
      * hardware. The clicky emulator has no BCM (lcd_init() false there), so
      * this block is skipped, keeping the emulator smoke green; the register
@@ -5320,10 +5345,6 @@ _Noreturn void kernel_main(void) {
          * we never drop back because the browser never returns (fine for
          * bring-up — the device is on a cable during testing). */
         cpu_boost();
-
-        /* Backlight to full (GPIO charge-pump dimmer) so the splash + UI are lit;
-         * run_ui dims then turns it off after inactivity. */
-        backlight_init();
 
         /* Bring up the I2C control bus now (not just at first-song hal_audio_init)
          * so the status strip can read the PCF50605 battery gauge from the menu.
