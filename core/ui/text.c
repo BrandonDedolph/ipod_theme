@@ -200,6 +200,36 @@ static int notdef_advance(const atlas_t *a) {
     return (notdef_w(a) + 2) << ATLAS_ADV_SHIFT;
 }
 
+/*
+ * Kerning adjustment between two glyph indices, in 26.6. Binary search over
+ * the atlas's sorted pair table (<=11 probes for ~1500 pairs), keyed on
+ * (left<<8)|right. Returns 0 when either side has no glyph or the face ships
+ * no table.
+ *
+ * MUST be applied identically by text_width() and text_draw_c() — they are
+ * contractually required to return the same pen for the same string, and the
+ * marquee chains on that value.
+ */
+static int kern_adv(const atlas_t *a, int prev_gi, int gi) {
+    if (prev_gi < 0 || gi < 0 || a->kern_n == 0 ||
+        prev_gi > 0xFF || gi > 0xFF) {
+        return 0;
+    }
+    unsigned key = ((unsigned)prev_gi << 8) | (unsigned)gi;
+    int lo = 0, hi = (int)a->kern_n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) >> 1;
+        const atlas_kern_t *k = &a->kern[mid];
+        unsigned kk = ((unsigned)k->left << 8) | (unsigned)k->right;
+        if (kk == key) {
+            return ATLAS_KERN_TO_ADV(k->adj);
+        }
+        if (kk < key) lo = mid + 1;
+        else          hi = mid - 1;
+    }
+    return 0;
+}
+
 /* Advance for a codepoint with no atlas glyph (blank or box). */
 static int fallback_advance(const atlas_t *a, int cp) {
     return is_blank_cp(cp) ? a->glyphs[0].advance : notdef_advance(a);
@@ -217,14 +247,17 @@ int text_width(const char *s, const text_font_t *font) {
      * per glyph is what used to drift a title by 1-2px against its own
      * centring.
      */
-    int w = 0, cp;
+    int w = 0, cp, prev_gi = -1;
     while ((cp = utf8_next(&p)) >= 0) {
         int gi = glyph_index(cp);
         if (gi < 0) {
             w += fallback_advance(a, cp);
+            prev_gi = -1;              /* no glyph: nothing to kern against */
             continue;
         }
+        w += kern_adv(a, prev_gi, gi);
         w += a->glyphs[gi].advance;
+        prev_gi = gi;
     }
     return ATLAS_ADV_PX(w);
 }
@@ -307,10 +340,16 @@ static int text_draw_c(uint16_t *fb, int fb_w, int fb_h, int x, int y,
      */
     const int x0 = x;
     int pen = 0;
-    int cp;
+    int cp, prev_gi = -1;
     while ((cp = utf8_next(&p)) >= 0) {
-        x = x0 + ATLAS_ADV_PX(pen);
         int gi = glyph_index(cp);
+        /* Kern BEFORE the pen is rounded into a position, so the pair's
+         * adjustment can actually move this glyph. */
+        if (gi >= 0) {
+            pen += kern_adv(a, prev_gi, gi);
+        }
+        prev_gi = gi;                  /* gi < 0 => nothing to kern against */
+        x = x0 + ATLAS_ADV_PX(pen);
         if (gi < 0) {
             if (!is_blank_cp(cp)) {
                 draw_notdef(fb, fb_w, x, y, a, ink, cx0, cx1, cy0, cy1);
@@ -339,10 +378,19 @@ static int text_draw_c(uint16_t *fb, int fb_w, int fb_h, int x, int y,
         }
         if (gx >= cx1) {
             pen += gly->advance;
+            /* Nothing further can land in the window, but the returned pen is
+             * the caller's contract, so keep accumulating — kerning included,
+             * or this tail would disagree with text_width(). */
             while ((cp = utf8_next(&p)) >= 0) {
                 int gj = glyph_index(cp);
-                pen += (gj < 0) ? fallback_advance(a, cp)
-                                : a->glyphs[gj].advance;
+                if (gj < 0) {
+                    pen += fallback_advance(a, cp);
+                    prev_gi = -1;
+                    continue;
+                }
+                pen += kern_adv(a, prev_gi, gj);
+                pen += a->glyphs[gj].advance;
+                prev_gi = gj;
             }
             break;
         }

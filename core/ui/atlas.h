@@ -70,9 +70,32 @@ typedef struct {
 /* Round a 26.6 pen position to whole pixels. */
 #define ATLAS_ADV_PX(v) (((v) + (ATLAS_ADV_ONE / 2)) >> ATLAS_ADV_SHIFT)
 
+/*
+ * One kerning pair. `adj` is in 1/32 px (KERN scale, NOT the 1/64 of an
+ * advance) so the whole entry fits 3 bytes with no padding; the renderer
+ * shifts it up by one to reach 26.6. Range +/-3.97px covers the worst real
+ * pair (bold-17 "LT", -2.21px) at 0.03px resolution.
+ *
+ * Nunito carries ~1500 kern pairs across ASCII and without them every
+ * affected gap renders too WIDE — "To"/"Ta" by ~1px at 13px, "LT" by 1.6px,
+ * against a natural gap of only 1-2px. Title-case music metadata hits them
+ * constantly (a quarter of all letter gaps in a sample of real album names),
+ * which is why the spacing read as wrong.
+ */
+typedef struct {
+    uint8_t left;                         /* glyph index */
+    uint8_t right;                        /* glyph index */
+    int8_t  adj;                          /* 1/32 px, almost always negative */
+} atlas_kern_t;
+
+/* Convert a kern adj to the 26.6 the pen runs in. */
+#define ATLAS_KERN_TO_ADV(k) ((int)(k) << 1)
+
 typedef struct {
     const atlas_glyph_t *glyphs;          /* 95 ASCII + non-ASCII extras */
     const uint8_t       *data;            /* concatenated glyph alpha rows */
+    const atlas_kern_t  *kern;            /* sorted by (left<<8)|right */
+    uint16_t             kern_n;          /* 0 = no kerning for this face */
     int8_t               ascent;          /* px above baseline */
     int8_t               descent;         /* px below baseline (positive) */
     int8_t               line_height;     /* recommended row spacing */

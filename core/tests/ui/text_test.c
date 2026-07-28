@@ -35,13 +35,37 @@ int main(void) {
     const text_font_t *font = text_font_bold_17();
     CHECK(font != NULL, "font handle is NULL");
 
-    /* ---- (a) width: positive, additive, matches draw advance ------- */
+    /* ---- (a) width: positive, matches draw advance ----------------- */
     int w_ag = text_width("Ag", font);
     int w_a  = text_width("A",  font);
     int w_g  = text_width("g",  font);
     CHECK(w_ag > 0, "text_width(\"Ag\") not positive");
     CHECK(w_a > 0 && w_g > 0, "single-glyph widths not positive");
-    CHECK(w_ag == w_a + w_g, "text_width not additive over glyphs");
+    /*
+     * Width is additive only to within kerning and a half pixel of rounding.
+     *
+     * This used to assert exact additivity (w_ag == w_a + w_g), which stopped
+     * being true when kerning landed — a kerned pair is deliberately NARROWER
+     * than its glyphs measured apart, and advances now accumulate in 26.6 and
+     * round once per call. That assertion survived only because "Ag" happens
+     * not to be a kern pair in Nunito; it would have passed while every kerned
+     * pair on the device rendered differently from what it claimed.
+     */
+    CHECK(w_ag <= w_a + w_g + 1 && w_ag >= w_a + w_g - 3,
+          "text_width wildly off the sum of its glyphs");
+
+    /*
+     * ...and kerning is actually APPLIED. "To" is a real Nunito pair (about
+     * -1px at 13px), so the pair must measure narrower than the two glyphs
+     * measured separately. Without this, an atlas regenerated with an empty
+     * kern table (e.g. Pillow falling back to the basic layout engine, which
+     * silently applies no kerning) would look correct to every other check
+     * here.
+     */
+    int w_To = text_width("To", font);
+    int w_T  = text_width("T",  font);
+    int w_o  = text_width("o",  font);
+    CHECK(w_To < w_T + w_o, "kerning not applied ('To' not tightened)");
     CHECK(text_line_height(font) > 0, "line_height not positive");
     CHECK(text_ascent(font) > 0, "ascent not positive");
 

@@ -51,6 +51,25 @@ ADV_SHIFT = 6
 ADV_ONE = 1 << ADV_SHIFT
 ADVANCE_MAX = 0xFFFF                 # the uint16_t field it is emitted into
 
+# Kerning. Stored per PAIR in 1/32 px in an int8_t, so the representable range
+# is +/-3.97px (worst real pair is bold-17 "LT" at -2.21px) at 0.03px
+# resolution. A pair is only emitted when |kern| reaches KERN_MIN_PX — below
+# that it cannot change a rounded pixel position often enough to be worth the
+# ROM.
+KERN_SHIFT = 5
+KERN_ONE = 1 << KERN_SHIFT
+# 0.25px. Measured trade at regular-13 across real album/artist strings:
+#   threshold   ASCII pairs   worst string-width error
+#     0.2500        640            0.66px
+#     0.1250       1116            0.66px
+#     0.0625       1394            0.41px
+# Every pair big enough to change a visible gap is >= 0.25px, so the tighter
+# thresholds buy only sub-pixel centring accuracy for roughly double the ROM
+# (~+50KB across the seven atlases). The residual shows up as string width,
+# never as the uneven letter gaps this was fixing.
+KERN_MIN_PX = 0.25
+KERN_ADJ_MIN, KERN_ADJ_MAX = -128, 127
+
 PRINTABLE = range(0x20, 0x7F)  # 0x20..0x7E inclusive — 95 glyphs
 
 # Non-ASCII glyphs appended AFTER the 95 ASCII glyphs, at fixed indices 95, 96,
@@ -111,8 +130,41 @@ def write_glyphmap(out_dir: str) -> None:
     sys.stderr.write(f"wrote {path}\n")
 
 
+def kern_pairs(font, chars):
+    """Kerning for every ordered pair of the glyphs we ship, in 1/32 px.
+
+    Measured as len(ab) - len(a) - len(b) through the SAME getlength() that
+    produces the advances, with Raqm layout doing the font's own shaping. That
+    is deliberate: reading GPOS separately would be a second source of truth
+    that could disagree with the advances we baked.
+
+    Returns [(left_idx, right_idx, adj32)] sorted by (left, right) so the
+    device can binary-search it.
+    """
+    single = {c: font.getlength(c) for c in chars}
+    out = []
+    for li, a in enumerate(chars):
+        for ri, b in enumerate(chars):
+            k = font.getlength(a + b) - single[a] - single[b]
+            if abs(k) < KERN_MIN_PX:
+                continue
+            adj = int(round(k * KERN_ONE))
+            if adj == 0:
+                continue
+            if adj < KERN_ADJ_MIN or adj > KERN_ADJ_MAX:
+                raise SystemExit(
+                    f"kern {a!r}{b!r} = {k:.3f}px does not fit int8 1/32px "
+                    f"(adj {adj}); widen the field")
+            out.append((li, ri, adj))
+    out.sort(key=lambda e: (e[0], e[1]))
+    return out
+
+
 def render_atlas(ttf_path: str, px_size: int, symbol: str) -> str:
-    font = ImageFont.truetype(ttf_path, px_size)
+    # Raqm applies the font's kerning in getlength(); the basic layout engine
+    # does not, and would silently emit an empty kern table.
+    font = ImageFont.truetype(ttf_path, px_size,
+                              layout_engine=ImageFont.Layout.RAQM)
     ascent, descent = font.getmetrics()
 
     glyph_data = bytearray()
@@ -202,11 +254,32 @@ def render_atlas(ttf_path: str, px_size: int, symbol: str) -> str:
         )
     out.append("};")
     out.append("")
+
+    # Kern table: sorted (left, right) so the device binary-searches it.
+    chars = [chr(cp) for cp in PRINTABLE] + [ch for _cp, ch in EXTRAS]
+    kerns = kern_pairs(font, chars)
+    out.append(f"/* {len(kerns)} kern pairs, adj in 1/32 px, sorted by")
+    out.append(" * (left<<8)|right for binary search. */")
+    if kerns:
+        out.append(f"static const atlas_kern_t {symbol}_KERN[{len(kerns)}] = {{")
+        for li, ri, adj in kerns:
+            lc = chars[li]
+            rc = chars[ri]
+            out.append(
+                f"    {{ {li:3d}, {ri:3d}, {adj:4d} }},"
+                f"   // '{lc}''{rc}'  {adj / KERN_ONE:+.2f}px")
+        out.append("};")
+    else:
+        out.append(f"static const atlas_kern_t {symbol}_KERN[1] = {{ {{0,0,0}} }};")
+    out.append("")
+
     # Line height: ascent + descent + a hair of leading.
     line_h = ascent + descent
     out.append(f"const atlas_t {symbol} = {{")
     out.append(f"    .glyphs      = {symbol}_GLYPHS,")
     out.append(f"    .data        = {symbol}_DATA,")
+    out.append(f"    .kern        = {symbol}_KERN,")
+    out.append(f"    .kern_n      = {len(kerns)},")
     out.append(f"    .ascent      = {ascent},")
     out.append(f"    .descent     = {descent},")
     out.append(f"    .line_height = {line_h},")
