@@ -2499,13 +2499,50 @@ static void shuffle_songs_play(fat32_t *fs)
     hal_volume_set(g_volume);
 }
 
+/*
+ * The album a song belongs to, resolved through its folder cluster and split
+ * out of the "Artist - Album" folder name. Writes "" when the folder isn't in
+ * the album table (a track whose folder never became an album entry).
+ *
+ * A linear scan, deliberately: it runs for the handful of rows actually on
+ * screen, so it is at worst a few thousand integer compares per repaint, and a
+ * cluster->album index would be another table to keep in sync with the loader
+ * for no measurable gain.
+ */
+static void song_album_title(const lib_song_t *sg, char *out)
+{
+    for (int i = 0; i < g_albums_n; i++) {
+        if (g_albums[i].clus == sg->dir_clus) {
+            char artist[NAME_MAX + 1];
+            split_artist_album(g_albums[i].folder, artist, out);
+            return;
+        }
+    }
+    out[0] = '\0';
+}
+
 static void songs_row_draw(int r, int idx)
 {
     lib_song_t *sg = &g_songs[g_songview[idx]];
     char dur[FMT_TIME_MAX];
     if (sg->duration_s) fmt_time(dur, sg->duration_s); else dur[0] = '\0';
-    list_row_titled(r, sg->title, sg->artist[0] ? sg->artist : 0,
-                    dur[0] ? dur : 0, idx == g_song_sel, 0);
+
+    /*
+     * Sub-line: normally the artist, because the unfiltered Songs list mixes
+     * every artist together and that is what tells rows apart.
+     *
+     * In an artist's "All Songs" the header ALREADY names the artist, so
+     * repeating it on every row spends the only sub-line on the one fact the
+     * user cannot need. Show the ALBUM there instead — in that view it is
+     * exactly what distinguishes one row from the next.
+     */
+    char alb[NAME_MAX + 1];
+    const char *sub = sg->artist[0] ? sg->artist : 0;
+    if (g_songview_artist[0]) {
+        song_album_title(sg, alb);
+        sub = alb[0] ? alb : 0;
+    }
+    list_row_titled(r, sg->title, sub, dur[0] ? dur : 0, idx == g_song_sel, 0);
 }
 
 static void songs_render(int sel)
