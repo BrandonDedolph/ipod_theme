@@ -4779,13 +4779,18 @@ _Noreturn static void run_ui(fat32_t *fs)
                  * chips, pump, and repaint only if one of THOSE appeared. */
                 const uint16_t *before[LIST_ROWS2];
                 int vtop = scroll_window(g_br_sel, g_albumview_n, LIST_ROWS2);
+                /* PEEK, not get: this loop is only observing. artcache_get
+                 * claims a way and re-stamps the LRU, so using it here (12
+                 * times a pass, always in row order) is what pinned the top
+                 * row to the lowest stamp and starved it. The render's own
+                 * artcache_get calls are what should drive residency. */
                 for (int r = 0; r < LIST_ROWS2; r++) {
-                    before[r] = artcache_get(vtop + r);
+                    before[r] = artcache_peek(vtop + r);
                 }
                 for (int k = 0; k < (idle_now ? 6 : 3) && artcache_pump(fs); k++) {
                 }
                 for (int r = 0; r < LIST_ROWS2; r++) {
-                    if (artcache_get(vtop + r) != before[r]) dirty = 1;
+                    if (artcache_peek(vtop + r) != before[r]) dirty = 1;
                 }
                 last_chip = nowc;
             }

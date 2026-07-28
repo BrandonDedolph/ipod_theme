@@ -118,6 +118,14 @@ enum {
 int artcache_state(int idx);
 
 /*
+ * Read-only sibling of artcache_get: returns the pixels if resident, else 0,
+ * WITHOUT claiming a way or touching the LRU stamp. Use this anywhere that is
+ * merely observing (e.g. "did this row's cover appear?"), so observation cannot
+ * reorder what the pump loads next.
+ */
+const uint16_t *artcache_peek(int idx);
+
+/*
  * The cache's sidecar staging buffer: ARTCACHE_SCRATCH_SZ bytes, valid for the
  * whole run. It is only live INSIDE artcache_pump(), so any other main-loop
  * code that needs a scratch area for the same job (reading a full-size

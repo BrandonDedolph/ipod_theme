@@ -203,6 +203,15 @@ int artcache_state(int idx)
     return ARTCACHE_ST_PENDING;
 }
 
+const uint16_t *artcache_peek(int idx)
+{
+    if (idx < 0 || idx >= ARTCACHE_SLOTS) {
+        return 0;
+    }
+    int w = find(idx);
+    return (w >= 0 && g_way[w].state == WAY_LOADED) ? g_way[w].px : 0;
+}
+
 const uint16_t *artcache_get(int idx)
 {
     if (idx < 0 || idx >= ARTCACHE_SLOTS) {
@@ -285,14 +294,26 @@ static int load_one(fat32_t *fs, uint32_t clus, uint32_t size, uint16_t *dst)
 
 int artcache_pump(fat32_t *fs)
 {
-    /* Most recently drawn QUEUED way first, so the covers the user can actually
-     * see resolve before ones they have scrolled away from. */
+    /*
+     * OLDEST outstanding request first.
+     *
+     * This used to take the most recently stamped way, on the theory that it is
+     * the one the user is looking at. But every visible row is re-stamped on
+     * every pass, in row order, so the TOP row always ended up with the lowest
+     * stamp and was therefore always last in line — permanently, since the
+     * ordering is re-established each pass. Any pass that ran out of budget
+     * starved it, which is why the first album's cover stayed blank until you
+     * scrolled it out of the window and back (re-claiming it at a fresh stamp).
+     *
+     * All the candidates here are on screen anyway, so FIFO is both fair and
+     * starvation-free: a request that has waited longest cannot keep losing.
+     */
     int pick = -1;
     for (int i = 0; i < ARTCACHE_WAYS; i++) {
         if (g_way[i].state != WAY_QUEUED) {
             continue;
         }
-        if (pick < 0 || g_way[i].stamp > g_way[pick].stamp) {
+        if (pick < 0 || g_way[i].stamp < g_way[pick].stamp) {
             pick = i;
         }
     }
