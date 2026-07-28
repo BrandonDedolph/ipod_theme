@@ -105,6 +105,19 @@ int artcache_pump(fat32_t *fs);
 const uint16_t *artcache_get(int idx);
 
 /*
+ * Why `idx` has no pixels — a DIAGNOSTIC, so a blank chip on the device can be
+ * told apart from the outside without a serial cable. Reading this has no side
+ * effects (unlike artcache_get, which claims a way).
+ */
+enum {
+    ARTCACHE_ST_LOADED   = 0,   /* pixels are resident                        */
+    ARTCACHE_ST_NOCLUS   = 1,   /* no sidecar was ever registered for it       */
+    ARTCACHE_ST_NOART    = 2,   /* tried and gave up: unreadable / not a CART  */
+    ARTCACHE_ST_PENDING  = 3,   /* queued or not yet claimed — still coming    */
+};
+int artcache_state(int idx);
+
+/*
  * The cache's sidecar staging buffer: ARTCACHE_SCRATCH_SZ bytes, valid for the
  * whole run. It is only live INSIDE artcache_pump(), so any other main-loop
  * code that needs a scratch area for the same job (reading a full-size

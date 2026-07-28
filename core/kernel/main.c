@@ -1377,11 +1377,16 @@ static void detail_render(int sel)
 /* A neutral tile shown in a row's chip slot until its real cover loads, so the
  * text doesn't shift right when the thumbnail pops in. Filled once at startup. */
 static uint16_t g_chip_ph[ARTCACHE_DIM * ARTCACHE_DIM];
+/* Diagnostic placeholders — see albumlist_row_draw. */
+static uint16_t g_chip_noclus[ARTCACHE_DIM * ARTCACHE_DIM];
+static uint16_t g_chip_noart[ARTCACHE_DIM * ARTCACHE_DIM];
 
 static void chip_placeholder_init(void)
 {
     for (int i = 0; i < ARTCACHE_DIM * ARTCACHE_DIM; i++) {
-        g_chip_ph[i] = LINEN_BORDER;
+        g_chip_ph[i]     = LINEN_BORDER;
+        g_chip_noclus[i] = 0xFD20;             /* amber: no cluster resolved   */
+        g_chip_noart[i]  = 0xF800;             /* red:   load gave up          */
     }
 }
 
@@ -1411,7 +1416,19 @@ static void albumlist_row_draw(int r, int idx)
      * than the cache has slots. */
     artcache_queue(idx, e->thm_clus, e->thm_size, e->art_clus, e->art_size);
     const uint16_t *chip = artcache_get(idx);
-    if (!chip) chip = g_chip_ph;           /* reserve the space meanwhile       */
+    if (!chip) {
+        /* DIAGNOSTIC: tint the placeholder by WHY there are no pixels, so a
+         * blank chip is self-describing on a device with no serial cable.
+         *   grey  = still coming (queued)
+         *   amber = no sidecar cluster was ever resolved for this album
+         *   red   = tried to load it and gave up
+         * Remove once the first-album blank is understood. */
+        switch (artcache_state(idx)) {
+        case ARTCACHE_ST_NOCLUS: chip = g_chip_noclus; break;
+        case ARTCACHE_ST_NOART:  chip = g_chip_noart;  break;
+        default:                 chip = g_chip_ph;     break;
+        }
+    }
     /* Show "Album" as the title and the artist as a sub-line (parsed from the
      * "Artist - Album" folder name). In an artist's own list the artist sub
      * is redundant, so drop it there. */

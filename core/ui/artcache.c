@@ -184,6 +184,25 @@ void artcache_queue(int idx, uint32_t thm_clus, uint32_t thm_size,
     }
 }
 
+int artcache_state(int idx)
+{
+    if (idx < 0 || idx >= ARTCACHE_SLOTS) {
+        return ARTCACHE_ST_NOCLUS;
+    }
+    for (int i = 0; i < ARTCACHE_WAYS; i++) {
+        if (g_way[i].key == (int16_t)idx && g_way[i].state == WAY_LOADED) {
+            return ARTCACHE_ST_LOADED;
+        }
+    }
+    if (noart(idx)) {
+        return ARTCACHE_ST_NOART;
+    }
+    if (g_album[idx].thm_clus == 0 && g_album[idx].art_clus == 0) {
+        return ARTCACHE_ST_NOCLUS;
+    }
+    return ARTCACHE_ST_PENDING;
+}
+
 const uint16_t *artcache_get(int idx)
 {
     if (idx < 0 || idx >= ARTCACHE_SLOTS) {
