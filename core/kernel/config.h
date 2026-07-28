@@ -59,8 +59,26 @@
 #define CONFIG_SECTORS      (CONFIG_SLOT_SECTORS * CONFIG_SLOTS)  /* 4 LBAs  */
 #define CONFIG_MIN_BYTES    (CONFIG_SLOT_BYTES * CONFIG_SLOTS)    /* 2048 B  */
 
-/* Record layout version this build writes. Readers accept <= this. */
-#define CONFIG_VERSION      1u
+/*
+ * Record layout version this build writes. Readers accept <= this.
+ *
+ *   v1  the settings fields (12 payload bytes).
+ *   v2  + the resume locator (hash / elapsed / length, 12 more bytes).
+ *
+ * The v2 payload is v1's with fields APPENDED — no existing offset moved, so
+ * the header and the first 12 payload bytes of a v1 record on a user's disk
+ * still mean exactly what they meant. Compatibility runs both ways, and the
+ * `length` field (not the version) is what decides how much payload to read:
+ *
+ *   - v2 firmware reading the v1 record already on the device: accepted,
+ *     length says 12, the resume fields decode as "nothing to resume".
+ *   - v1 firmware reading a v2 record: version 2 > its CONFIG_VERSION, so it
+ *     REJECTS the slot outright and keeps defaults. Declining is the whole
+ *     point — it never half-interprets a payload it doesn't know.
+ *
+ * tools/make_config.py is the host half of this and must be bumped in step.
+ */
+#define CONFIG_VERSION      2u
 
 /*
  * Bind the module to a mounted volume and load the newest valid record.

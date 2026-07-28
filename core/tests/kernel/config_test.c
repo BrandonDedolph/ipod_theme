@@ -188,7 +188,10 @@ static int settings_eq(const settings_t *a, const settings_t *b)
            a->balance == b->balance &&
            a->backlight_secs == b->backlight_secs &&
            a->backlight_bright == b->backlight_bright &&
-           a->theme == b->theme && a->clicker == b->clicker;
+           a->theme == b->theme && a->clicker == b->clicker &&
+           a->resume_hash == b->resume_hash &&
+           a->resume_secs == b->resume_secs &&
+           a->resume_total == b->resume_total;
 }
 
 /* A settings_t with every field distinct from the defaults and at an extreme
@@ -200,6 +203,7 @@ static void spicy(settings_t *s)
     s->bass = -12;   s->treble = 12;  s->balance = -100;
     s->backlight_secs = 60; s->backlight_bright = 1;
     s->theme = 3;    s->clicker = 2;
+    s->resume_hash = 0xDEADBEEFu; s->resume_secs = 1234; s->resume_total = 5678;
 }
 
 /* ---- mock-bus programming ---------------------------------------------- */
@@ -377,6 +381,193 @@ static void test_codec(void)
           out.volume == 100 && out.backlight_bright == 32 &&
           out.bass == -12 && out.theme == 3 &&
           out.backlight_secs == 5);
+}
+
+/* ---- 2b. the v2 resume tail, and v1 compatibility ---------------------- */
+
+/*
+ * Re-stamp a record's CRC after poking its bytes, so what we hand the decoder
+ * is genuinely valid and only its CONTENT is under test. Spelled out here
+ * rather than imported from config.c for the same reason the write trace
+ * spells out its opcodes: a test that reuses the implementation's CRC agrees
+ * with whatever the implementation happens to compute.
+ */
+static void recrc(uint8_t *rec)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < CONFIG_SLOT_BYTES - 4u; i++) {
+        crc ^= rec[i];
+        for (int b = 0; b < 8; b++) {
+            uint32_t m = (uint32_t)0u - (crc & 1u);
+            crc = (crc >> 1) ^ (0xEDB88320u & m);
+        }
+    }
+    crc = ~crc;
+    rec[CONFIG_SLOT_BYTES - 4] = (uint8_t)crc;
+    rec[CONFIG_SLOT_BYTES - 3] = (uint8_t)(crc >> 8);
+    rec[CONFIG_SLOT_BYTES - 2] = (uint8_t)(crc >> 16);
+    rec[CONFIG_SLOT_BYTES - 1] = (uint8_t)(crc >> 24);
+}
+
+/* Offsets are restated as literals, not imported: this file is the
+ * independent statement of the on-disk contract that config.c has to meet. */
+#define T_OFF_VERSION 4u
+#define T_OFF_LENGTH  6u
+#define T_OFF_SEQ     8u
+#define T_OFF_PAYLOAD 12u
+#define T_LEN_V1      12u          /* settings only                        */
+#define T_LEN_V2      24u          /* + resume hash/secs/total, 4 bytes ea. */
+#define T_OFF_RES     (T_OFF_PAYLOAD + T_LEN_V1)   /* 24: resume_hash      */
+#define T_RESUME_MAX  86400u       /* the decoder's ceiling on both counts  */
+
+static void put32le(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;         p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t get32le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/*
+ * The resume locator is the only field in this record that can make the device
+ * DO something on its own at boot, so every way it can be wrong is a way to
+ * wake up playing the wrong thing. The tests below pin, in order:
+ *
+ *   - the record this build writes really is v2 with a v2 length;
+ *   - the V1 RECORD SITTING ON THE USER'S IPOD RIGHT NOW still decodes, and
+ *     decodes to "no resume" rather than reading three 32-bit fields out of
+ *     the zero padding. This is the live-format constraint, and it is the
+ *     stale-resume fallback for every already-deployed device;
+ *   - `length`, not `version`, gates the tail;
+ *   - hash 0 means no resume, enforced on both sides of the codec;
+ *   - a CRC-valid but insane position is clamped, not forwarded to the seek.
+ */
+static void test_resume_record(void)
+{
+    uint8_t rec[CONFIG_SLOT_BYTES];
+    settings_t in, out;
+    uint32_t seq = 0;
+
+    /* What this build emits. */
+    defaults(&in);
+    spicy(&in);
+    config_encode(rec, &in, 7);
+    check("record is version 2", rec[T_OFF_VERSION] == 2 &&
+                                 rec[T_OFF_VERSION + 1] == 0);
+    check("record declares the v2 payload length",
+          rec[T_OFF_LENGTH] == T_LEN_V2 && rec[T_OFF_LENGTH + 1] == 0);
+    check("resume fields land at the documented offsets",
+          get32le(&rec[T_OFF_RES])     == 0xDEADBEEFu &&
+          get32le(&rec[T_OFF_RES + 4]) == 1234u &&
+          get32le(&rec[T_OFF_RES + 8]) == 5678u);
+
+    /* Round-trip through decode (settings_eq covers all three fields). */
+    memset(&out, 0xA5, sizeof out);
+    check("resume round-trips",
+          config_decode(rec, &out, &seq) == 1 && settings_eq(&in, &out));
+
+    /*
+     * A REAL V1 RECORD, built by hand exactly as the shipped v1 encoder did:
+     * version 1, length 12, nothing after the settings bytes. This is the
+     * record already on the device, and mis-parsing it is the one failure the
+     * version bump exists to prevent.
+     */
+    {
+        settings_t v1;
+        defaults(&v1);
+        v1.volume = 42; v1.theme = 1; v1.clicker = 3;
+        config_encode(rec, &v1, 99);
+        rec[T_OFF_VERSION] = 1;
+        put32le(&rec[T_OFF_RES],     0);      /* v1 wrote only zero padding */
+        put32le(&rec[T_OFF_RES + 4], 0);
+        put32le(&rec[T_OFF_RES + 8], 0);
+        rec[T_OFF_LENGTH] = (uint8_t)T_LEN_V1;
+        recrc(rec);
+
+        memset(&out, 0x5A, sizeof out);       /* caller's struct is garbage */
+        check("v1 record still decodes under a v2 build",
+              config_decode(rec, &out, &seq) == 1 && seq == 99u &&
+              out.volume == 42 && out.theme == 1 && out.clicker == 3);
+        check("v1 record decodes to NO resume",
+              out.resume_hash == 0 && out.resume_secs == 0 &&
+              out.resume_total == 0);
+    }
+
+    /*
+     * length, not version, gates the tail: a record that says v2 but declares
+     * the v1 length must NOT have its resume read out of the bytes that
+     * follow — those are padding as far as `length` is concerned, and
+     * believing them is how a truncated write becomes a seek target.
+     */
+    config_encode(rec, &in, 5);               /* real resume bytes present */
+    rec[T_OFF_LENGTH] = (uint8_t)T_LEN_V1;
+    recrc(rec);
+    memset(&out, 0x5A, sizeof out);
+    check("a v1 length suppresses the resume tail even at version 2",
+          config_decode(rec, &out, &seq) == 1 &&
+          out.resume_hash == 0 && out.resume_secs == 0 &&
+          out.resume_total == 0);
+
+    /* A length between v1 and v2 is still short of the tail. */
+    config_encode(rec, &in, 5);
+    rec[T_OFF_LENGTH] = (uint8_t)(T_LEN_V2 - 1u);
+    recrc(rec);
+    check("a length one byte short of v2 suppresses the tail",
+          config_decode(rec, &out, &seq) == 1 && out.resume_hash == 0);
+
+    /* Hash 0 = nothing to resume. ENCODE must drop the position with it, so a
+     * record can never carry a position belonging to no track. */
+    defaults(&in);
+    in.resume_hash = 0; in.resume_secs = 900; in.resume_total = 1000;
+    config_encode(rec, &in, 3);
+    check("encode drops a position with no track",
+          get32le(&rec[T_OFF_RES + 4]) == 0 &&
+          get32le(&rec[T_OFF_RES + 8]) == 0);
+
+    /* …and DECODE re-asserts it, for a hand-edited or third-party record. */
+    defaults(&in);
+    in.resume_hash = 1; in.resume_secs = 900; in.resume_total = 1000;
+    config_encode(rec, &in, 3);
+    put32le(&rec[T_OFF_RES], 0);              /* hash cleared, position left */
+    recrc(rec);
+    check("decode drops a position with no track",
+          config_decode(rec, &out, &seq) == 1 && out.resume_hash == 0 &&
+          out.resume_secs == 0 && out.resume_total == 0);
+
+    /* An absurd position in an otherwise valid record is clamped, not passed
+     * through. player_seek_to clamps to the real track length too; this is the
+     * layer that stops a garbage record getting that far. */
+    defaults(&in);
+    in.resume_hash = 0x11223344u;
+    config_encode(rec, &in, 4);
+    put32le(&rec[T_OFF_RES + 4], 0xFFFFFFFFu);
+    put32le(&rec[T_OFF_RES + 8], 0xFFFFFFFFu);
+    recrc(rec);
+    check("decode clamps an insane resume position",
+          config_decode(rec, &out, &seq) == 1 &&
+          out.resume_secs == T_RESUME_MAX && out.resume_total == T_RESUME_MAX);
+
+    /* Encode clamps the same way, so a runaway elapsed counter cannot be
+     * written in the first place. */
+    defaults(&in);
+    in.resume_hash = 0x11223344u;
+    in.resume_secs = 0xFFFFFFFFu; in.resume_total = 0xFFFFFFFFu;
+    config_encode(rec, &in, 4);
+    check("encode clamps an insane resume position",
+          get32le(&rec[T_OFF_RES + 4]) == T_RESUME_MAX &&
+          get32le(&rec[T_OFF_RES + 8]) == T_RESUME_MAX);
+
+    /* A corrupt resume tail must take the WHOLE record down, not silently
+     * yield a half-trusted locator — the CRC covers the payload, so this is
+     * really a check that the tail is inside the covered range. */
+    config_encode(rec, &in, 4);
+    rec[T_OFF_RES + 2] ^= 0x01;
+    check("a flipped resume byte fails the CRC",
+          config_decode(rec, &out, &seq) == 0);
 }
 
 /* ---- seq ordering ------------------------------------------------------ */
@@ -705,6 +896,12 @@ static void test_host_fixture(const char *path)
           s.volume == 70 && s.backlight_secs == 15 &&
           s.backlight_bright == 32 && s.shuffle == 0 &&
           s.repeat == REPEAT_OFF && s.theme == 0 && s.clicker == 1);
+    /* The host tool writes the v2 layout too — if it kept emitting v1 the
+     * device would still boot, but a freshly imported iPod would silently be
+     * unable to remember a position until its first save. */
+    check("host record is v2 with an empty resume locator",
+          blob[4] == 2 && blob[5] == 0 && blob[6] == 24 && blob[7] == 0 &&
+          s.resume_hash == 0 && s.resume_secs == 0 && s.resume_total == 0);
     check("host tool leaves slot 1 empty for the first device write",
           config_decode(&blob[CONFIG_SLOT_BYTES], &s, &seq) == 0);
 }
@@ -713,6 +910,7 @@ int main(int argc, char **argv)
 {
     test_file_lba();
     test_codec();
+    test_resume_record();
     test_seq_order();
     test_two_slot();
     test_write_trace();

@@ -572,6 +572,24 @@ if target == 'sim'
   )
   test('name-hash', name_hash_test, suite: 'unit')
 
+  # resume: which library song the boot path may re-open for a saved resume
+  # position (kernel/main.c resume_find_song). The rest of the resume feature
+  # degrades gracefully — a missed capture loses a position, a rejected record
+  # means "start from the menu" — but this is the one answer that is ACTED ON,
+  # so a wrong one wakes the device playing somebody else's track. Covers the
+  # happy path, every stale case (deleted / unindexed / unresolved / empty
+  # library / empty locator), and the ambiguity rules: duplicate filenames are
+  # disambiguated by the saved track LENGTH, and decline outright when the
+  # length cannot choose. Compiles a verbatim copy of the static function
+  # (like name_hash_ref.c); hw-resume-parity below diffs it against main.c.
+  resume_test = executable(
+    'resume_test',
+    sources: ['kernel/resume_test.c', 'kernel/name_hash_ref.c'],
+    include_directories: include_directories('kernel', '.'),
+    override_options: test_opts,
+  )
+  test('resume', resume_test, suite: 'unit')
+
   # player-queue: the queue / auto-advance / repeat / shuffle logic of
   # core/player/player.c — 753 lines with no test at all, and the part users
   # notice when it is wrong (a queue that stops a track early, a Repeat All
@@ -633,6 +651,15 @@ if target == 'sim'
     test('hw-name-hash-parity', py,
          args: [meson.current_source_dir() / 'scripts' /
                 'check_name_hash_parity.py'],
+         suite: 'unit')
+
+    # hw-resume-parity: the same guard for the resume matcher — the copy in
+    # tests/kernel/resume_test.c must not drift from kernel/main.c, and
+    # RESUME_DUR_SLOP must agree. A drifted copy is worse than no test: it
+    # passes while the device applies a different rule.
+    test('hw-resume-parity', py,
+         args: [meson.current_source_dir() / 'scripts' /
+                'check_resume_parity.py'],
          suite: 'unit')
   endif
 endif
