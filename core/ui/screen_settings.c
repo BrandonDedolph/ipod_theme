@@ -44,6 +44,10 @@
 #define S_TRK      g_pal[PAL_TRK]      /* slider track                           */
 #define S_SB_TRK   g_pal[PAL_SB_TRK]   /* scrollbar track                        */
 #define S_SB_THMB  g_pal[PAL_SB_THMB]  /* scrollbar thumb                        */
+/* Warning red. Same literal as kernel/main.c's BATT_LOW_RED — deliberately a
+ * fixed colour and not a palette slot: it must stay legible as a WARNING in
+ * every theme, which is exactly what a themed palette entry would not. */
+#define S_WARN     0xE125u
 #define S_SEL_TRK  g_pal[PAL_SEL_TRK]  /* slider track on a selected row         */
 #define S_PILL_OFF g_pal[PAL_PILL_OFF] /* toggle pill OFF fill                   */
 
@@ -461,6 +465,7 @@ void settings_diag_render(uint32_t total_ms, uint32_t lcd_ms, uint32_t disk_ms,
                           uint32_t lib_ms, uint32_t resume_ms,
                           uint32_t res_dir_ms, uint32_t res_open_ms,
                           uint32_t res_seek_ms,
+                          uint32_t decode_us_kframe, uint32_t underruns,
                           int cfg_writable, uint32_t cfg_seq,
                           uint32_t lba0, uint32_t lba1)
 {
@@ -517,6 +522,33 @@ void settings_diag_render(uint32_t total_ms, uint32_t lcd_ms, uint32_t disk_ms,
         st_text(16, y, "OTHER", F_SMALL, S_MUTED2);
         fmt_ms(v, other);
         st_text_right(16, y, v, F_SUB, S_MUTED_D);
+    }
+
+    /*
+     * Decode margin: microseconds of CPU per 1000 PCM frames, against the
+     * 22676 us/kframe that 44.1 kHz real time allows. This is the number that
+     * says whether turning FLAC CRC back on (which is what buys us O(log n)
+     * seeks instead of brute-force ones) costs us headroom. Only meaningful
+     * once something has actually played, so it renders "--" until then.
+     */
+    {
+        int y = 112 + 6 * 18;
+        st_text(16, y, "DECODE", F_SMALL, S_MUTED);
+        if (decode_us_kframe == 0) {
+            st_text_right(16, y, "--", F_SUB, S_MUTED_D);
+        } else {
+            int pct = (int)((decode_us_kframe * 100u) / 22676u);
+            su_to_str(v, (unsigned)pct);
+            su_append(v, "% of real time");
+            /* Red once we are inside 20% of the budget: past that a slow disk
+             * refill turns into an audible underrun rather than a near miss. */
+            st_text_right(16, y, v, F_SUB, (pct >= 80) ? S_WARN : S_INK);
+        }
+        if (underruns) {
+            su_to_str(v, underruns);
+            su_append(v, " underrun");
+            st_text(28, y + 14, v, F_SMALL, S_WARN);
+        }
     }
 
     console_fill_rect(16, 196, LCD_WIDTH - 32, 1, S_BORDER);

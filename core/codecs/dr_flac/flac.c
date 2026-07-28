@@ -35,14 +35,37 @@
 #define DR_FLAC_NO_STDIO          /* no fopen / fread paths */
 #define DR_FLAC_NO_OGG            /* skip Ogg-FLAC for now; can re-enable */
 /*
- * CRC-16 verification off. dr_flac otherwise CRCs every decoded frame
- * byte-by-byte on top of the decode itself — real cost on a 80 MHz ARM7TDMI
- * with no spare margin — and we act on the result nowhere: a failed frame
- * comes back from drflac_read_pcm_frames_s16 as 0 frames, which flac_decode
- * reports as end of stream exactly like a genuine EOS. Paying for a check we
- * can't distinguish from the normal end of a track buys nothing.
+ * CRC verification is ON, and that is a SEEK decision, not a correctness one.
+ *
+ * It used to be off (DR_FLAC_NO_CRC), reasoning that dr_flac CRCs every
+ * decoded frame on top of the decode itself, and that we act on the result
+ * nowhere — a failed frame comes back as 0 frames, which flac_decode reports
+ * as end of stream exactly like a genuine EOS.
+ *
+ * That reasoning was sound and the conclusion was still wrong, because
+ * DR_FLAC_NO_CRC also compiles out dr_flac's BINARY SEARCH seek:
+ *
+ *     #if !defined(DR_FLAC_NO_CRC)
+ *         if (!wasSuccessful && ... ) { ...binary_search(...) }
+ *     #endif
+ *
+ * The guard is real, not incidental: the binary search lands on an arbitrary
+ * byte and must decide whether it is looking at a genuine frame header or at
+ * audio data that merely resembles a sync code, and the header CRC is what
+ * settles that.
+ *
+ * With CRC off, and a library whose files carry NO SEEKTABLE (verified: these
+ * FLACs hold STREAMINFO + PICTURE + VORBIS_COMMENT + PADDING and nothing
+ * else), every seek fell through to brute force — decoding from the start of
+ * the track. Measured on device 2026-07-27: resuming ~30 s into a track cost
+ * 5.1 s of a 8.4 s cold boot, and the same cost applies to every manual scrub.
+ *
+ * Trading some per-frame decode margin for O(log n) seeks is the right way
+ * round. The margin is visible on Settings -> Boot Details (DECODE, against
+ * the 22676 us/kframe real-time budget at 44.1 kHz) — if it ever gets tight,
+ * the fix is a seek table in the files, not brute-force seeking.
  */
-#define DR_FLAC_NO_CRC
+/* #define DR_FLAC_NO_CRC */
 
 /*
  * Freestanding build (bare-metal ARM, -DCORE_FREESTANDING): route dr_flac's
