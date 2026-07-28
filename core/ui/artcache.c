@@ -105,7 +105,17 @@ static void set_noart(int idx, int on)
 static int find(int idx)
 {
     for (int i = 0; i < ARTCACHE_WAYS; i++) {
-        if (g_way[i].key == (int16_t)idx) {
+        /*
+         * The state test is load-bearing, not belt-and-braces. `key` uses -1
+         * for "unused", but .bss starts every way at key 0 — which is a VALID
+         * album index (the first one). Matching on key alone therefore made
+         * album 0 find a zeroed way, take artcache_get's already-resident
+         * early return, and never reach the claim path: it was never queued,
+         * so no pump ordering could ever load it, and its chip stayed blank
+         * until enough scrolling evicted the zombie by LRU. Requiring a live
+         * state makes the lookup correct even if nothing initialises us.
+         */
+        if (g_way[i].key == (int16_t)idx && g_way[i].state != WAY_EMPTY) {
             return i;
         }
     }

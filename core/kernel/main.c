@@ -3833,6 +3833,8 @@ _Noreturn static void run_ui(fat32_t *fs)
     clickwheel_init();
     player_init(fs);
     chip_placeholder_init();
+    artcache_init();                  /* ways must start at key -1; .bss gives 0,
+                                       * which is album 0's real index */
     library_ensure(fs);                   /* preload the index at boot (drive is
                                            * spinning) so Songs/Albums/Artists/
                                            * Genres open INSTANTLY, like Apple —
