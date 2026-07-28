@@ -90,7 +90,11 @@ typedef enum {
     SETTINGS_ENTER_ABOUT,
     SETTINGS_ENTER_THEME,
     SETTINGS_ENTER_CLICKER,
-    SETTINGS_ACTION_RESET
+    SETTINGS_ACTION_RESET,
+    /* Reboot into the Apple boot ROM's USB mass-storage mode. Lives under
+     * Settings rather than the main menu: it is a maintenance action, not a
+     * place you browse to. */
+    SETTINGS_ACTION_DISKMODE
 } settings_action_t;
 
 /*

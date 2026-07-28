@@ -123,8 +123,9 @@ static int bl_step(int secs, int dir, int wrap)
 /* Only rows that actually do something are listed — the cosmetic placeholders
  * (Crossfade, Replaygain, Skip Length, Stereo Width, Shortcuts, Language) were
  * removed so the menu never presents a control that has no effect. */
-static const char *const ROOT_L[7] = {
-    "Playback", "Sound", "Theme", "Display", "Clicker", "About", "Reset Settings",
+static const char *const ROOT_L[8] = {
+    "Playback", "Sound", "Theme", "Display", "Clicker", "About",
+    "Disk Mode", "Reset Settings",
 };
 static const char *const PLAY_L[2] = { "Shuffle", "Repeat" };
 static const char *const SOUND_L[4] = { "Volume", "Bass", "Treble", "Balance" };
@@ -159,7 +160,7 @@ void settings_defaults(settings_t *s)
 int settings_count(int screen)
 {
     switch (screen) {
-    case SETTINGS_ROOT:     return 7;
+    case SETTINGS_ROOT:     return 8;
     case SETTINGS_PLAYBACK: return 2;
     case SETTINGS_SOUND:    return 4;
     case SETTINGS_DISPLAY:  return 2;
@@ -206,7 +207,8 @@ int settings_kind(int screen, int idx)
 {
     switch (screen) {
     case SETTINGS_ROOT:
-        if (idx == 6) return SETTINGS_KIND_ACTION;    /* Reset Settings */
+        /* Disk Mode + Reset Settings both fire on SELECT; the rest descend. */
+        if (idx == 6 || idx == 7) return SETTINGS_KIND_ACTION;
         return SETTINGS_KIND_SUBMENU;                 /* incl. Clicker submenu */
     case SETTINGS_CLICKER:
         return SETTINGS_KIND_SELECT;                  /* radio pick, marked active */
@@ -303,7 +305,8 @@ int settings_activate(int screen, settings_t *s, int idx)
         case 3: return SETTINGS_ENTER_DISPLAY;
         case 4: return SETTINGS_ENTER_CLICKER;
         case 5: return SETTINGS_ENTER_ABOUT;
-        case 6: return SETTINGS_ACTION_RESET;
+        case 6: return SETTINGS_ACTION_DISKMODE;
+        case 7: return SETTINGS_ACTION_RESET;
         default: return SETTINGS_ACTION_NONE;
         }
 

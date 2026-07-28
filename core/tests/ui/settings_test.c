@@ -119,8 +119,16 @@ int main(void)
           settings_activate(SETTINGS_ROOT, &s, 3) == SETTINGS_ENTER_DISPLAY);
     check("enter-about",
           settings_activate(SETTINGS_ROOT, &s, 5) == SETTINGS_ENTER_ABOUT);
+    check("diskmode-action",
+          settings_activate(SETTINGS_ROOT, &s, 6) == SETTINGS_ACTION_DISKMODE);
     check("reset-action",
-          settings_activate(SETTINGS_ROOT, &s, 6) == SETTINGS_ACTION_RESET);
+          settings_activate(SETTINGS_ROOT, &s, 7) == SETTINGS_ACTION_RESET);
+    /* Both fire on SELECT rather than descending — a SUBMENU kind here would
+     * make the UI push a screen that does not exist. */
+    check("diskmode-is-action",
+          settings_kind(SETTINGS_ROOT, 6) == SETTINGS_KIND_ACTION);
+    check("reset-is-action",
+          settings_kind(SETTINGS_ROOT, 7) == SETTINGS_KIND_ACTION);
     check("enter-clicker",
           settings_activate(SETTINGS_ROOT, &s, 4) == SETTINGS_ENTER_CLICKER);
     check("count-clicker", settings_count(SETTINGS_CLICKER) == 8);
@@ -130,7 +138,7 @@ int main(void)
     check("clicker-off", s.clicker == 0);
 
     /* --- Test 11: counts + generic value/kind reporting --- */
-    check("count-root",  settings_count(SETTINGS_ROOT) == 7);
+    check("count-root",  settings_count(SETTINGS_ROOT) == 8);
     check("count-play",  settings_count(SETTINGS_PLAYBACK) == 2);
     check("count-sound", settings_count(SETTINGS_SOUND) == 4);
     check("count-theme", settings_count(SETTINGS_THEME) == 2);
