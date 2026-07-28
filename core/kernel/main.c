@@ -3491,40 +3491,31 @@ static char initial_of(const char *s)
 /* The selected row's initial on the alphabetised lists (songs / artists /
  * albums), read straight off the already-sorted arrays; 0 on screens where an
  * A-Z cue would mean nothing. */
+/*
+ * The A-Z locator letter for a row, or 0 on screens that have no alphabetical
+ * order to locate WITHIN.
+ *
+ * SONGS ONLY, deliberately. Letter stepping is worth its cost on the one list
+ * that is thousands of entries long and sorted by title; on a fixed six-row
+ * menu it is meaningless, and on Artists/Albums the lists are short enough that
+ * row acceleration already gets you there. Returning 0 here is also what stops
+ * wheel_move() from trying to letter-step a list that cannot be letter-stepped
+ * — see the guard there.
+ */
 static char list_initial_at(int idx)
 {
-    switch (scr_cur()) {
-    case SCR_SONGS:
-        if (idx >= 0 && idx < g_songview_n) {
-            return initial_of(g_songs[g_songview[idx]].title);
-        }
-        break;
-    case SCR_ARTISTS:
-        if (idx >= 0 && idx < g_artists_n) {
-            return initial_of(artist_key(g_artists[idx].name));
-        }
-        break;
-    case SCR_BROWSER:
-        if (g_dir_depth == 0 && idx >= 0 && idx < g_albumview_n) {
-            char a[NAME_MAX + 1], b[NAME_MAX + 1];
-            split_artist_album(g_albums[g_albumview[idx]].folder, a, b);
-            return initial_of(b);              /* albums sort by album title */
-        }
-        break;
-    default:
-        break;
+    if (scr_cur() != SCR_SONGS) {
+        return 0;
+    }
+    if (idx >= 0 && idx < g_songview_n) {
+        return initial_of(g_songs[g_songview[idx]].title);
     }
     return 0;
 }
 
 static char list_sel_initial(void)
 {
-    switch (scr_cur()) {
-    case SCR_SONGS:   return list_initial_at(g_song_sel);
-    case SCR_ARTISTS: return list_initial_at(g_artist_sel);
-    case SCR_BROWSER: return list_initial_at(g_br_sel);
-    default:          return 0;
-    }
+    return (scr_cur() == SCR_SONGS) ? list_initial_at(g_song_sel) : 0;
 }
 
 /*
@@ -3648,7 +3639,16 @@ static int wheel_move(int sel, int count, int8_t delta, int *accum)
      * and where you're going; stepping letters lets you aim. Falls through to
      * row acceleration on screens with no alphabetical order (list_letter_step
      * returns `sel` unchanged there). */
-    if (move != 0 && wheel_letter_mode()) {
+    /*
+     * `list_initial_at(sel) != 0` is the load-bearing half of this guard: it
+     * asks "does THIS screen have letters to step through at all". Without it
+     * the branch was taken on every screen, list_letter_step returned `sel`
+     * unchanged on the ones with no alphabetical order (menus, settings, the
+     * queue, a tracklist), and the early return below meant the wheel never
+     * fell through to row scrolling — so spinning fast on those screens did
+     * nothing at all.
+     */
+    if (move != 0 && wheel_letter_mode() && list_initial_at(sel) != 0) {
         int dir  = (move > 0) ? 1 : -1;
         int step = (move > 0) ? move : -move;
         for (int i = 0; i < step; i++) {
