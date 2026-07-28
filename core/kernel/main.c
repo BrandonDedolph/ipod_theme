@@ -515,6 +515,9 @@ static uint32_t     g_boot_t0_us;    /* stamped right after timer_init        */
 static uint32_t     g_boot_lcd_ms;   /* lcd_init(): cold BCM bring-up         */
 static uint32_t     g_boot_disk_ms;  /* ata_init + first read + FAT32 mount   */
 static uint32_t     g_boot_resume_ms;/* resume_restore(): readdir + open+seek */
+static uint32_t     g_boot_res_dir_ms;  /* ...of which: album readdir         */
+static uint32_t     g_boot_res_open_ms; /* ...of which: open + art + prime    */
+static uint32_t     g_boot_res_seek_ms; /* ...of which: player_seek_to()      */
 static uint32_t     g_boot_total_ms; /* to the first UI paint                 */
 
 /* ms since g_boot_t0_us (USEC_TIMER wraps; the subtraction is unsigned so a
@@ -2711,6 +2714,8 @@ static void settings_render_cur(void)
         (void)config_probe_lba(1, &lba1);
         settings_diag_render(g_boot_total_ms, g_boot_lcd_ms, g_boot_disk_ms,
                              g_lib_load_ms, g_boot_resume_ms,
+                             g_boot_res_dir_ms, g_boot_res_open_ms,
+                             g_boot_res_seek_ms,
                              config_writable(), config_seq(), lba0, lba1);
     } else {
         settings_render(g_set_screen, &g_settings, g_set_sel);
@@ -3947,7 +3952,9 @@ static void resume_restore(fat32_t *fs)
      */
     int saved_depth = g_dir_depth;
     g_dir_depth = 1;
+    uint32_t rt0 = boot_ms_now();
     browse_load(fs, g_songs[si].dir_clus);
+    g_boot_res_dir_ms = boot_ms_now() - rt0;
     g_dir_depth = saved_depth;
 
     int idx = -1;
@@ -3967,8 +3974,10 @@ static void resume_restore(fat32_t *fs)
      * currently holds, so a 0 here means the DAC comes up silent and the pause
      * lands before a single audible sample. Restored at the bottom. */
     hal_volume_set(0);
+    uint32_t ot0 = boot_ms_now();
     player_play_queue(g_browse, g_browse_n, idx, g_art_clus, g_art_size);
     player_pause();
+    g_boot_res_open_ms = boot_ms_now() - ot0;
 
     /* player_play_queue() skips forward over a track it cannot open. That is
      * right for a user pressing SELECT and wrong for a silent restore — being
@@ -3983,7 +3992,9 @@ static void resume_restore(fat32_t *fs)
     if (g_browse[idx].fmt == 0 && g_settings.resume_secs >= RESUME_MIN_SECS) {
         /* Clamped to the track length inside player_seek_to, and a refusal is
          * simply "resumed at 0:00" — never a reason to abandon the track. */
+        uint32_t st0 = boot_ms_now();
         (void)player_seek_to(g_settings.resume_secs);
+        g_boot_res_seek_ms = boot_ms_now() - st0;
     }
     hal_volume_set(g_volume);
 

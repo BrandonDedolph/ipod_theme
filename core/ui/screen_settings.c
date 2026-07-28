@@ -414,6 +414,8 @@ static void fmt_ms(char *d, uint32_t ms)
  */
 void settings_diag_render(uint32_t total_ms, uint32_t lcd_ms, uint32_t disk_ms,
                           uint32_t lib_ms, uint32_t resume_ms,
+                          uint32_t res_dir_ms, uint32_t res_open_ms,
+                          uint32_t res_seek_ms,
                           int cfg_writable, uint32_t cfg_seq,
                           uint32_t lba0, uint32_t lba1)
 {
@@ -441,11 +443,31 @@ void settings_diag_render(uint32_t total_ms, uint32_t lcd_ms, uint32_t disk_ms,
         known += phv[i];
     }
 
+    /* Resume dominates a warm boot, so it gets its own split: directory read,
+     * open (incl. album art + decoder prime), and the seek. Indented and
+     * dimmer — these are a breakdown OF the RESUME row above, not additions
+     * to it, and must not read as separate phases. */
+    {
+        int y = 112 + 4 * 18;
+        static const char *const SUB[3] = { "dir", "open", "seek" };
+        uint32_t subv[3] = { res_dir_ms, res_open_ms, res_seek_ms };
+        int      x = 28;
+        for (int i = 0; i < 3; i++) {
+            char b[24];
+            su_copy(b, SUB[i]);
+            st_text(x, y, b, F_SMALL, S_MUTED2);
+            x += text_width(b, F_SMALL) + 4;
+            fmt_ms(b, subv[i]);
+            st_text(x, y, b, F_SMALL, S_MUTED_D);
+            x += text_width(b, F_SMALL) + 10;
+        }
+    }
+
     /* "OTHER" is the honest remainder: clock/cache/timer bring-up, i2c, the
      * splash, and anything we forgot to time. If this row is large, that is
      * where the next optimisation lives. */
     {
-        int y = 112 + 4 * 18;
+        int y = 112 + 5 * 18;
         uint32_t other = (total_ms > known) ? total_ms - known : 0;
         st_text(16, y, "OTHER", F_SMALL, S_MUTED2);
         fmt_ms(v, other);

@@ -216,6 +216,8 @@ void settings_about_render(int battery_pct, int battery_mv,
  */
 void settings_diag_render(uint32_t total_ms, uint32_t lcd_ms, uint32_t disk_ms,
                           uint32_t lib_ms, uint32_t resume_ms,
+                          uint32_t res_dir_ms, uint32_t res_open_ms,
+                          uint32_t res_seek_ms,
                           int cfg_writable, uint32_t cfg_seq,
                           uint32_t lba0, uint32_t lba1);
 
