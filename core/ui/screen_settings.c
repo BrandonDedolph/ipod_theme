@@ -439,10 +439,32 @@ void settings_about_render(int battery_pct, int battery_mv,
     }
 }
 
-/* Format milliseconds as "W.Fs" (one decimal), or "--" for an unmeasured 0. */
+
+/* ---------------------------------------------------------------------------
+ * Boot Details (SETTINGS_DIAG)
+ * ------------------------------------------------------------------------- */
+
+/*
+ * "This phase did not run", distinct from "this phase ran and took no
+ * measurable time". The first version conflated them — both rendered "--" —
+ * which made the screen actively misleading the moment it mattered: after the
+ * FLAC seek fix, a seek that had become instant was indistinguishable from a
+ * seek that had been skipped.
+ */
+#define MS_NA  0xFFFFFFFFu
+
+/*
+ * Sub-second times are the interesting ones now, so render them in ms rather
+ * than rounding a 40 ms seek to "0.0s". Over a second, one decimal is plenty.
+ */
 static void fmt_ms(char *d, uint32_t ms)
 {
-    if (ms == 0) { su_copy(d, "--"); return; }
+    if (ms == MS_NA) { su_copy(d, "--"); return; }
+    if (ms < 1000u) {
+        int i = su_to_str(d, ms);
+        su_copy(d + i, "ms");
+        return;
+    }
     int i = su_to_str(d, ms / 1000u);
     d[i++] = '.';
     d[i++] = (char)('0' + (ms / 100u) % 10u);
@@ -450,17 +472,25 @@ static void fmt_ms(char *d, uint32_t ms)
     d[i]   = '\0';
 }
 
+/* Draw `s` so it ends at x = right. */
+static void st_text_at_right(int right, int y, const char *s,
+                             const text_font_t *font, uint16_t ink)
+{
+    st_text(right - text_width(s, font), y, s, font, ink);
+}
+
 /*
- * Boot Details — the cold-boot phase breakdown plus the settings-file locator.
- *
- * Split off About deliberately. About is the "what is this device" dashboard;
- * these are diagnostics, and the CFG rows had already been squeezed into a gap
- * there (an earlier attempt at y=92/102 landed on top of the stat columns).
- *
- * The phases are shown as measured, and TOTAL is measured independently rather
- * than summed — so a phase nobody instrumented shows up as the difference
- * between TOTAL and the rows above it, instead of quietly disappearing.
+ * Phase colours. Fixed literals rather than palette slots, on purpose: this is
+ * a diagnostic chart, and its segments have to stay distinguishable from each
+ * other in any theme — which is exactly what themed tokens would not
+ * guarantee. Ordered to match the legend.
  */
+#define C_LCD   0x3BDBu    /* blue      */
+#define C_DISK  0x3DADu    /* green     */
+#define C_LIB   0xE546u    /* amber     */
+#define C_RES   0xE125u    /* red       */
+#define C_OTHER 0x94B2u    /* grey      */
+
 void settings_diag_render(uint32_t total_ms, uint32_t lcd_ms, uint32_t disk_ms,
                           uint32_t lib_ms, uint32_t resume_ms,
                           uint32_t res_dir_ms, uint32_t res_open_ms,
@@ -473,106 +503,130 @@ void settings_diag_render(uint32_t total_ms, uint32_t lcd_ms, uint32_t disk_ms,
     console_clear(S_SURFACE);
     header_render("Boot Details", "", 1);
 
-    /* --- total, as the hero number --- */
+    /* --- headline: label left, total right, on one line --- */
+    st_text(16, 60, "COLD BOOT", F_SMALL, S_MUTED);
     fmt_ms(v, total_ms);
-    st_text((LCD_WIDTH - text_width(v, F_BIG)) / 2, 66, v, F_BIG, S_INK);
-    st_text((LCD_WIDTH - text_width("COLD BOOT", F_SMALL)) / 2, 82,
-            "COLD BOOT", F_SMALL, S_MUTED);
-    console_fill_rect(16, 94, LCD_WIDTH - 32, 1, S_BORDER);
+    st_text_right(16, 63, v, F_BIG, S_INK);
 
-    /* --- per-phase rows --- */
-    static const char *const PH[4] = { "LCD / BCM", "DISK + MOUNT",
-                                       "LIBRARY", "RESUME" };
-    uint32_t phv[4] = { lcd_ms, disk_ms, lib_ms, resume_ms };
-    uint32_t known  = 0;
-    for (int i = 0; i < 4; i++) {
-        int y = 112 + i * 18;
-        st_text(16, y, PH[i], F_SMALL, S_MUTED);
-        fmt_ms(v, phv[i]);
-        st_text_right(16, y, v, F_SUB, S_INK);
-        known += phv[i];
-    }
-
-    /* Resume dominates a warm boot, so it gets its own split: directory read,
-     * open (incl. album art + decoder prime), and the seek. Indented and
-     * dimmer — these are a breakdown OF the RESUME row above, not additions
-     * to it, and must not read as separate phases. */
+    /*
+     * --- stacked proportional bar ---
+     * Where the time went, at a glance. Widths come from the SAME numbers as
+     * the legend below, so the picture cannot disagree with the figures. The
+     * remainder segment is drawn last and simply takes what is left, which is
+     * why unattributed time shows up as grey rather than silently rescaling
+     * the others.
+     */
     {
-        int y = 112 + 4 * 18;
-        static const char *const SUB[3] = { "dir", "open", "seek" };
-        uint32_t subv[3] = { res_dir_ms, res_open_ms, res_seek_ms };
-        int      x = 28;
-        for (int i = 0; i < 3; i++) {
-            char b[24];
-            su_copy(b, SUB[i]);
-            st_text(x, y, b, F_SMALL, S_MUTED2);
-            x += text_width(b, F_SMALL) + 4;
-            fmt_ms(b, subv[i]);
-            st_text(x, y, b, F_SMALL, S_MUTED_D);
-            x += text_width(b, F_SMALL) + 10;
+        int bx = 16, by = 74, bw = LCD_WIDTH - 32, bh = 10;
+        st_round_rect(bx, by, bw, bh, 5, S_TRK);
+        if (total_ms > 0) {
+            uint32_t seg[4] = { lcd_ms, disk_ms, lib_ms, resume_ms };
+            uint16_t col[4] = { C_LCD, C_DISK, C_LIB, C_RES };
+            int x = bx;
+            for (int i = 0; i < 4; i++) {
+                int w = (int)(((uint64_t)seg[i] * (uint32_t)bw) / total_ms);
+                if (w <= 0) continue;                  /* too small to see */
+                if (x + w > bx + bw) w = bx + bw - x;
+                console_fill_rect(x, by, w, bh, col[i]);
+                x += w;
+            }
+            if (x < bx + bw) {
+                console_fill_rect(x, by, bx + bw - x, bh, C_OTHER);
+            }
         }
-    }
-
-    /* "OTHER" is the honest remainder: clock/cache/timer bring-up, i2c, the
-     * splash, and anything we forgot to time. If this row is large, that is
-     * where the next optimisation lives. */
-    {
-        int y = 112 + 5 * 18;
-        uint32_t other = (total_ms > known) ? total_ms - known : 0;
-        st_text(16, y, "OTHER", F_SMALL, S_MUTED2);
-        fmt_ms(v, other);
-        st_text_right(16, y, v, F_SUB, S_MUTED_D);
     }
 
     /*
-     * Decode margin: microseconds of CPU per 1000 PCM frames, against the
-     * 22676 us/kframe that 44.1 kHz real time allows. This is the number that
-     * says whether turning FLAC CRC back on (which is what buys us O(log n)
-     * seeks instead of brute-force ones) costs us headroom. Only meaningful
-     * once something has actually played, so it renders "--" until then.
+     * --- legend, two columns ---
+     * Six entries in two columns of three rather than six stacked rows: the
+     * panel is 240 px tall and the single-column version ran into the config
+     * block at the bottom.
      */
     {
-        int y = 112 + 6 * 18;
-        st_text(16, y, "DECODE", F_SMALL, S_MUTED);
-        if (decode_us_kframe == 0) {
-            st_text_right(16, y, "--", F_SUB, S_MUTED_D);
-        } else {
-            int pct = (int)((decode_us_kframe * 100u) / 22676u);
-            su_to_str(v, (unsigned)pct);
-            su_append(v, "% of real time");
-            /* Red once we are inside 20% of the budget: past that a slow disk
-             * refill turns into an audible underrun rather than a near miss. */
-            st_text_right(16, y, v, F_SUB, (pct >= 80) ? S_WARN : S_INK);
+        static const char *const NM[6] = { "LCD", "DISK", "LIBRARY",
+                                           "RESUME", "OTHER", "DECODE" };
+        uint16_t cl[6] = { C_LCD, C_DISK, C_LIB, C_RES, C_OTHER, 0 };
+        uint32_t known = lcd_ms + disk_ms + lib_ms + resume_ms;
+        uint32_t val[5] = { lcd_ms, disk_ms, lib_ms, resume_ms,
+                            (total_ms > known) ? total_ms - known : 0 };
+        int colx[2] = { 16, 168 };
+        int colw    = 136;
+        for (int i = 0; i < 6; i++) {
+            int cx = colx[i / 3];
+            int y  = 104 + (i % 3) * 18;
+            console_fill_rect(cx, y - 7, 6, 6, cl[i] ? cl[i] : S_MUTED2);
+            st_text(cx + 11, y, NM[i], F_SMALL, S_MUTED);
+            if (i < 5) {
+                fmt_ms(v, val[i]);
+                st_text_at_right(cx + colw, y, v, F_SUB, S_INK);
+            } else {
+                /*
+                 * Decode headroom against the 22676 us/kframe that 44.1 kHz
+                 * real time allows — the number that says whether re-enabling
+                 * FLAC CRC (which is what buys O(log n) seeks) cost us
+                 * margin. Red inside 20% of the budget: past that a slow disk
+                 * refill becomes an audible underrun instead of a near miss.
+                 */
+                if (decode_us_kframe == 0) {
+                    st_text_at_right(cx + colw, y, "--", F_SUB, S_MUTED_D);
+                } else {
+                    int pct = (int)((decode_us_kframe * 100u) / 22676u);
+                    su_to_str(v, (unsigned)pct);
+                    su_append(v, "%");
+                    st_text_at_right(cx + colw, y, v, F_SUB,
+                                     (pct >= 80) ? S_WARN : S_INK);
+                }
+            }
         }
-        if (underruns) {
-            su_to_str(v, underruns);
-            su_append(v, " underrun");
-            st_text(28, y + 14, v, F_SMALL, S_WARN);
+    }
+
+    console_fill_rect(16, 152, LCD_WIDTH - 32, 1, S_BORDER);
+
+    /* --- the resume split, as one line: it is a breakdown OF the RESUME
+     * entry above, not three more phases, so it is indented and dimmer. --- */
+    {
+        static const char *const SUB[3] = { "dir", "open", "seek" };
+        uint32_t sv[3] = { res_dir_ms, res_open_ms, res_seek_ms };
+        int x = 16;
+        st_text(x, 168, "RESUME", F_SMALL, S_MUTED2);
+        x += text_width("RESUME", F_SMALL) + 10;
+        for (int i = 0; i < 3; i++) {
+            st_text(x, 168, SUB[i], F_SMALL, S_MUTED2);
+            x += text_width(SUB[i], F_SMALL) + 4;
+            fmt_ms(v, sv[i]);
+            st_text(x, 168, v, F_SMALL, S_INK);
+            x += text_width(v, F_SMALL) + 12;
         }
+    }
+
+    if (underruns) {
+        su_to_str(v, underruns);
+        su_append(v, " audio underrun");
+        st_text(16, 186, v, F_SMALL, S_WARN);
     }
 
     console_fill_rect(16, 196, LCD_WIDTH - 32, 1, S_BORDER);
 
     /*
-     * Settings-file state and the two absolute LBAs config_save() writes to.
-     * This is the ONLY way to run the mandatory pre-write safety check on this
-     * device: tools/make_config.py says to boot, read the LBA the firmware
-     * reports, and confirm it matches the host's independently computed address
-     * BEFORE anything is written — "a mismatch there is the bug that overwrites
+     * --- settings-file locator ---
+     * The two absolute LBAs config_save() writes to. This is the ONLY way to
+     * run the mandatory pre-write safety check on this device:
+     * tools/make_config.py says to boot, read the LBA the firmware reports,
+     * and confirm it matches the host's independently computed address BEFORE
+     * anything is written — "a mismatch there is the bug that overwrites
      * somebody's music library". That procedure assumes a serial cable, and
-     * there is none here, so the number has to reach the user's eyes on the
-     * panel. Read-only: nothing on this screen writes.
+     * there is none here, so the number has to reach the panel. Read-only.
      */
-    st_text(16, 212, "CONFIG", F_SMALL, S_MUTED);
+    st_text(16, 214, "CONFIG", F_SMALL, S_MUTED);
     if (!cfg_writable) {
-        st_text_right(16, 212, "not writable", F_SUB, S_MUTED_D);
+        st_text_right(16, 214, "not writable", F_SUB, S_MUTED_D);
     } else {
         su_copy(v, "seq ");
         su_to_str(v + 4, cfg_seq);
-        st_text_right(16, 212, v, F_SUB, S_INK);
+        st_text_right(16, 214, v, F_SUB, S_INK);
         int i = su_to_str(v, lba0);
         su_copy(v + i, " / ");
         su_to_str(v + i + 3, lba1);
-        st_text_right(16, 228, v, F_SMALL, S_MUTED_D);
+        st_text_right(16, 230, v, F_SMALL, S_MUTED_D);
     }
 }

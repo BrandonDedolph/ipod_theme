@@ -515,9 +515,17 @@ static uint32_t     g_boot_t0_us;    /* stamped right after timer_init        */
 static uint32_t     g_boot_lcd_ms;   /* lcd_init(): cold BCM bring-up         */
 static uint32_t     g_boot_disk_ms;  /* ata_init + first read + FAT32 mount   */
 static uint32_t     g_boot_resume_ms;/* resume_restore(): readdir + open+seek */
-static uint32_t     g_boot_res_dir_ms;  /* ...of which: album readdir         */
-static uint32_t     g_boot_res_open_ms; /* ...of which: open + art + prime    */
-static uint32_t     g_boot_res_seek_ms; /* ...of which: player_seek_to()      */
+/*
+ * ...of which. MS_NA (see ui/screen_settings.c) means "this step did not run"
+ * — NOT "it took 0 ms". Conflating those made the screen lie exactly when it
+ * mattered: after the FLAC seek fix an instant seek looked identical to a
+ * skipped one. Seeded to MS_NA before resume_restore(), overwritten by each
+ * step that actually executes.
+ */
+#define BOOT_MS_NA 0xFFFFFFFFu
+static uint32_t     g_boot_res_dir_ms  = BOOT_MS_NA; /* album readdir        */
+static uint32_t     g_boot_res_open_ms = BOOT_MS_NA; /* open + art + prime   */
+static uint32_t     g_boot_res_seek_ms = BOOT_MS_NA; /* player_seek_to()     */
 static uint32_t     g_boot_total_ms; /* to the first UI paint                 */
 
 /* ms since g_boot_t0_us (USEC_TIMER wraps; the subtraction is unsigned so a
