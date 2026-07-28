@@ -3775,6 +3775,8 @@ static void suspend_to_ram(uint32_t play_down_us)
         if ((uint32_t)(mmio_read32(USEC_TIMER_ADDR) - play_down_us) > 5000000u) {
             enter_standby();              /* true off (PMU) — does not return */
         }
+        /* See the wake loop below for why this drain is load-bearing. */
+        while (clickwheel_get_event(&drain)) { }
         cpu_wait_ms(20);
     }
     while (clickwheel_get_event(&drain)) { }   /* drop the trigger's latched events */
@@ -3782,6 +3784,26 @@ static void suspend_to_ram(uint32_t play_down_us)
     /* Low-power idle until any button is pressed. The 100 Hz tick keeps sampling
      * the wheel into the latch through each cpu_wait, so a press is seen fast. */
     while (clickwheel_buttons() == 0) {
+        /*
+         * DRAINING HERE IS WHAT MAKES THE DEVICE WAKE AT ALL.
+         *
+         * clickwheel_buttons() returns a CACHED value that only the 100 Hz tick
+         * sampler refreshes. When the Hold switch goes off, the sampler gates
+         * the OPTO block's clock back on but deliberately defers the reset/
+         * config sequence out of ISR context by setting s_need_bringup — and
+         * then bails on every subsequent tick until something clears it. The
+         * only thing that clears it is clickwheel_get_event().
+         *
+         * So a user who suspends and then flips Hold on and off again (the
+         * standard reflex after "turning it off") left the cached button state
+         * pinned at 0 forever: this loop span on a value that could never
+         * change, dark and unresponsive, with a hardware reset the only escape.
+         * The normal main loop never hit this because it drains every pass.
+         *
+         * Draining does not clear the cached state, so the loop condition is
+         * unaffected — it only lets the deferred bring-up actually run.
+         */
+        while (clickwheel_get_event(&drain)) { }
         cpu_wait_ms(30);
     }
     /* Swallow the wake press so it isn't also acted on as navigation. */
