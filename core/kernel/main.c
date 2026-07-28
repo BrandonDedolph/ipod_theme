@@ -2690,6 +2690,11 @@ static void settings_render_cur(void)
          * not report a cached value. Read-only: nothing here writes.
          */
         {
+            /* About's own rows sit at 62 / 100 / 116 / 150 / 176 / 212
+             * (ui/screen_settings.c), so these two go in the clear gap between
+             * STORAGE and BATTERY. The first attempt used 92/102 and landed on
+             * top of the stat columns. */
+            #define CFG_ROW_Y 190
             char ln[48];
             int  k = 0;
             uint32_t lba0 = 0, lba1 = 0;
@@ -2699,22 +2704,19 @@ static void settings_render_cur(void)
             if (!config_writable()) {
                 for (const char *q = "not writable"; *q; q++) ln[k++] = *q;
                 ln[k] = '\0';
-                ui_text_centered(g_lib_truncated ? 100 : 92, ln,
-                                 FONT_SMALL, LINEN_MUTED_D);
+                ui_text_centered(CFG_ROW_Y, ln, FONT_SMALL, LINEN_MUTED_D);
             } else {
                 for (const char *q = "seq "; *q; q++) ln[k++] = *q;
                 k += u32_to_dec(ln + k, config_seq());
                 ln[k] = '\0';
-                ui_text_centered(g_lib_truncated ? 100 : 92, ln,
-                                 FONT_SMALL, LINEN_MUTED_D);
+                ui_text_centered(CFG_ROW_Y, ln, FONT_SMALL, LINEN_MUTED_D);
                 k = 0;
                 for (const char *q = "LBA "; *q; q++) ln[k++] = *q;
                 k += u32_to_dec(ln + k, ok0 ? lba0 : 0);
                 ln[k++] = ' '; ln[k++] = '/'; ln[k++] = ' ';
                 k += u32_to_dec(ln + k, ok1 ? lba1 : 0);
                 ln[k] = '\0';
-                ui_text_centered(g_lib_truncated ? 110 : 102, ln,
-                                 FONT_SMALL, LINEN_MUTED_D);
+                ui_text_centered(CFG_ROW_Y + 12, ln, FONT_SMALL, LINEN_MUTED_D);
             }
         }
         if (g_lib_load_ms) {
