@@ -1399,23 +1399,63 @@ static void chip_placeholder_init(void)
  * album actually changed. */
 static void albumlist_queue_chips(void)
 {
-    for (int i = 0; i < g_albumview_n && i < ARTCACHE_SLOTS; i++) {
-        const lib_album_t *al = &g_albums[g_albumview[i]];
-        artcache_queue(i, al->thm_clus, al->thm_size, al->art_clus, al->art_size);
+    for (int i = 0; i < g_albumview_n; i++) {
+        int a = g_albumview[i];
+        if (a >= ARTCACHE_SLOTS) continue;
+        const lib_album_t *al = &g_albums[a];
+        artcache_queue(a, al->thm_clus, al->thm_size, al->art_clus, al->art_size);
     }
+}
+
+/*
+ * The album list carries a synthetic "All Songs" row at index 0 WHEN it is
+ * showing a single artist — browsing an artist by album alone makes a track you
+ * remember but cannot place hard to reach. Row 0 is the artist's whole
+ * discography in title order; rows 1.. are the albums.
+ *
+ * Everything that indexes the list has to agree about that offset, so it is
+ * expressed once here and every caller goes through albumlist_album_at().
+ */
+static int albumlist_all_row(void)
+{
+    return g_artist_filter[0] ? 1 : 0;
+}
+
+static int albumlist_count(void)
+{
+    return g_albumview_n + albumlist_all_row();
+}
+
+/* Global g_albums[] index for a list row, or -1 for the "All Songs" row. */
+static int albumlist_album_at(int row)
+{
+    int k = row - albumlist_all_row();
+    if (k < 0 || k >= g_albumview_n) {
+        return -1;
+    }
+    return g_albumview[k];
 }
 
 /* One album row at list-row `r` showing album-view entry `idx`. Split out of
  * albumlist_render so a selection move can repaint just the rows that changed. */
 static void albumlist_row_draw(int r, int idx)
 {
-    const lib_album_t *e = &g_albums[g_albumview[idx]];
+    int a = albumlist_album_at(idx);
+    if (a < 0) {                            /* the synthetic "All Songs" row */
+        list_row_tall(r, "All Songs", 0, 0, 1, idx == g_br_sel, 0, 0);
+        return;
+    }
+    const lib_album_t *e = &g_albums[a];
     /* (Re)queue the visible rows every paint — idempotent for a slot that
      * already holds this album, and it's what gets a cover for rows past the
      * bulk prefetch in albumlist_queue_chips when the library has more albums
-     * than the cache has slots. */
-    artcache_queue(idx, e->thm_clus, e->thm_size, e->art_clus, e->art_size);
-    const uint16_t *chip = artcache_get(idx);
+     * than the cache has slots.
+     *
+     * Keyed by the GLOBAL album index, not the row: the row number shifts when
+     * an artist filter adds the "All Songs" row, and it means a different album
+     * under a different filter — so a row-keyed cache aliases across filters. */
+    artcache_queue(a, e->thm_clus, e->thm_size, e->art_clus, e->art_size);
+    const uint16_t *chip = artcache_get(a);
     if (!chip) {
         /* DIAGNOSTIC: tint the placeholder by WHY there are no pixels, so a
          * blank chip is self-describing on a device with no serial cable.
@@ -1423,7 +1463,7 @@ static void albumlist_row_draw(int r, int idx)
          *   amber = no sidecar cluster was ever resolved for this album
          *   red   = tried to load it and gave up
          * Remove once the first-album blank is understood. */
-        switch (artcache_state(idx)) {
+        switch (artcache_state(a)) {
         case ARTCACHE_ST_NOCLUS: chip = g_chip_noclus; break;
         case ARTCACHE_ST_NOART:  chip = g_chip_noart;  break;
         default:                 chip = g_chip_ph;     break;
@@ -1445,25 +1485,26 @@ static void albumlist_render(int sel)
     console_clear(LINEN_SURFACE);
     status_strip_render();
     char right[12];
-    if (g_albumview_n > 0) {
-        fmt_count(right, sel + 1, g_albumview_n);
+    int total = albumlist_count();
+    if (total > 0) {
+        fmt_count(right, sel + 1, total);
     } else {
         right[0] = '\0';
     }
     /* Header title = the artist when drilled in from Artists, else "Albums". */
     header_render(g_artist_filter[0] ? g_artist_filter : "Albums", right, 1);
 
-    if (g_albumview_n == 0) {
+    if (total == 0) {
         ui_text(14, LIST_Y0 + 20, "No albums", FONT_ROW, LINEN_MUTED);
         return;
     }
-    int top = scroll_window(sel, g_albumview_n, LIST_ROWS2);
+    int top = scroll_window(sel, total, LIST_ROWS2);
     for (int r = 0; r < LIST_ROWS2; r++) {
         int idx = top + r;
-        if (idx >= g_albumview_n) break;
+        if (idx >= total) break;
         albumlist_row_draw(r, idx);
     }
-    scrollbar_render(LIST_Y0, top, LIST_ROWS2, g_albumview_n);
+    scrollbar_render(LIST_Y0, top, LIST_ROWS2, total);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2287,15 +2328,30 @@ static void library_ensure(fat32_t *fs)
 }
 
 /* Populate g_songview with the songs to show (genre < 0 = all), title-ordered. */
-static void songview_build(int genre)
+/*
+ * Build the Songs view. `genre` < 0 means every genre; `artist` NULL means every
+ * artist. Artist matching folds through artist_key()+title_cmp, the same
+ * comparison build_artists() uses to merge "The Kid LAROI" with "Kid Laroi" —
+ * so an artist's song list contains exactly the songs its Artists row counted.
+ */
+/* Whose songs the current view holds ("" = everyone's), for the header. */
+static char g_songview_artist[NAME_MAX + 1];
+
+static void songview_build(int genre, const char *artist)
 {
     g_list_epoch++;
+    copy_display_name(g_songview_artist, artist ? artist : "", 0 /*keep ext*/);
     g_songview_n = 0;
     for (int i = 0; i < g_songs_n; i++) {
         int si = g_song_sorted[i];
-        if (genre < 0 || g_songs[si].genre == genre) {
-            g_songview[g_songview_n++] = (uint16_t)si;
+        if (genre >= 0 && g_songs[si].genre != genre) {
+            continue;
         }
+        if (artist && title_cmp(artist_key(g_songs[si].artist),
+                                artist_key(artist)) != 0) {
+            continue;
+        }
+        g_songview[g_songview_n++] = (uint16_t)si;
     }
     g_song_sel = g_song_accum = 0;
 }
@@ -2423,7 +2479,8 @@ static void songs_render(int sel)
     char right[12];
     if (g_songview_n > 0) fmt_count(right, sel + 1, g_songview_n);
     else                  right[0] = '\0';
-    header_render("Songs", right, 1);
+    header_render(g_songview_artist[0] ? g_songview_artist : "Songs",
+                  right, 1);
     if (g_songview_n == 0) {
         ui_text(14, LIST_Y0 + 20, "No songs", FONT_ROW, LINEN_MUTED);
         return;
@@ -3230,7 +3287,7 @@ static int list_view_current(list_view_t *v)
         fmt_count(v->right, v->sel + 1, v->count);
         break;
     case SCR_SONGS:
-        v->title   = "Songs";
+        v->title   = g_songview_artist[0] ? g_songview_artist : "Songs";
         v->count   = g_songview_n;
         v->sel     = g_song_sel;
         v->row     = songs_row_draw;
@@ -3255,7 +3312,7 @@ static int list_view_current(list_view_t *v)
     case SCR_BROWSER:
         if (g_dir_depth == 0) {
             v->title   = g_artist_filter[0] ? g_artist_filter : "Albums";
-            v->count   = g_albumview_n;
+            v->count   = albumlist_count();
             v->sel     = g_br_sel;
             v->row     = albumlist_row_draw;
             v->rh      = ROW_H2;
@@ -4163,7 +4220,7 @@ _Noreturn static void run_ui(fat32_t *fs)
                         scr_push(SCR_ARTISTS);
                     } else if (g_music_sel == MU_SONGS) {
                         library_ensure(fs);
-                        songview_build(-1);            /* all songs             */
+                        songview_build(-1, 0);         /* all songs, all artists */
                         scr_push(SCR_SONGS);
                     } else if (g_music_sel == MU_SHUFFLE) {
                         shuffle_songs_play(fs);        /* random albums, shuffled */
@@ -4237,7 +4294,7 @@ _Noreturn static void run_ui(fat32_t *fs)
                     dirty = 1;
                 }
                 if ((ev.buttons & WHEEL_BTN_SELECT) && g_genres_n > 0) {
-                    songview_build(g_genre_sel);        /* this genre's songs */
+                    songview_build(g_genre_sel, 0);     /* this genre's songs */
                     scr_push(SCR_SONGS);
                     dirty = 1;
                 }
@@ -4251,7 +4308,7 @@ _Noreturn static void run_ui(fat32_t *fs)
                 /* Depth 0 scrolls the album list (g_br_sel); depth 1 the loaded
                  * tracklist (g_det_sel) — separate so backing out restores the
                  * album-list position. */
-                int count = (g_dir_depth == 0) ? g_albumview_n : g_browse_n;
+                int count = (g_dir_depth == 0) ? albumlist_count() : g_browse_n;
                 int *sel  = (g_dir_depth == 0) ? &g_br_sel   : &g_det_sel;
                 int *acc  = (g_dir_depth == 0) ? &g_br_accum : &g_det_accum;
                 if (ev.wheel_delta && count > 0) {
@@ -4259,10 +4316,16 @@ _Noreturn static void run_ui(fat32_t *fs)
                     dirty = 1;                    /* window derived at paint time  */
                 }
                 if ((ev.buttons & WHEEL_BTN_SELECT) && count > 0) {
-                    if (g_dir_depth == 0) {
+                    if (g_dir_depth == 0 && albumlist_album_at(g_br_sel) < 0) {
+                        /* "All Songs" for the artist we are filtered to: the
+                         * whole discography in title order, so a track you
+                         * remember but cannot place to an album is reachable. */
+                        songview_build(-1, g_artist_filter);
+                        scr_push(SCR_SONGS);
+                    } else if (g_dir_depth == 0) {
                         /* Enter the selected album: load its tracklist + art. Keep
                          * g_br_sel (the album) so backing out lands back on it. */
-                        lib_album_t *al = &g_albums[g_albumview[g_br_sel]];
+                        lib_album_t *al = &g_albums[albumlist_album_at(g_br_sel)];
                         split_artist_album(al->folder,
                                            g_album_artist, g_album_title);
                         g_dir_depth = 1;
@@ -4811,19 +4874,25 @@ _Noreturn static void run_ui(fat32_t *fs)
                  * for rows nobody was looking at. Snapshot the visible rows'
                  * chips, pump, and repaint only if one of THOSE appeared. */
                 const uint16_t *before[LIST_ROWS2];
-                int vtop = scroll_window(g_br_sel, g_albumview_n, LIST_ROWS2);
+                int vtop = scroll_window(g_br_sel, albumlist_count(), LIST_ROWS2);
                 /* PEEK, not get: this loop is only observing. artcache_get
                  * claims a way and re-stamps the LRU, so using it here (12
                  * times a pass, always in row order) is what pinned the top
                  * row to the lowest stamp and starved it. The render's own
                  * artcache_get calls are what should drive residency. */
+                /* Map row -> global album index: the cache is keyed by album,
+                 * and a row is not an album when an artist filter puts the
+                 * synthetic "All Songs" row at 0. */
                 for (int r = 0; r < LIST_ROWS2; r++) {
-                    before[r] = artcache_peek(vtop + r);
+                    int a = albumlist_album_at(vtop + r);
+                    before[r] = (a >= 0) ? artcache_peek(a) : 0;
                 }
                 for (int k = 0; k < (idle_now ? 6 : 3) && artcache_pump(fs); k++) {
                 }
                 for (int r = 0; r < LIST_ROWS2; r++) {
-                    if (artcache_peek(vtop + r) != before[r]) dirty = 1;
+                    int a = albumlist_album_at(vtop + r);
+                    const uint16_t *now_px = (a >= 0) ? artcache_peek(a) : 0;
+                    if (now_px != before[r]) dirty = 1;
                 }
                 last_chip = nowc;
             }
