@@ -42,6 +42,8 @@
 #define S_SEL_SUB  g_pal[PAL_SEL_SUB]
 #define S_CHEVRON  g_pal[PAL_CHEVRON]
 #define S_TRK      g_pal[PAL_TRK]      /* slider track                           */
+#define S_SB_TRK   g_pal[PAL_SB_TRK]   /* scrollbar track                        */
+#define S_SB_THMB  g_pal[PAL_SB_THMB]  /* scrollbar thumb                        */
 #define S_SEL_TRK  g_pal[PAL_SEL_TRK]  /* slider track on a selected row         */
 #define S_PILL_OFF g_pal[PAL_PILL_OFF] /* toggle pill OFF fill                   */
 
@@ -153,14 +155,57 @@ static void draw_slider(int ry, int selected, int num, int den)
 /* ---------------------------------------------------------------------------
  * Generic list screens (Root / Playback / Sound / Display)
  * ------------------------------------------------------------------------- */
+/*
+ * Windowed-list scroll origin and scrollbar. Deliberately the same geometry
+ * and the same palette entries as the browser's in kernel/main.c (which owns
+ * the originals and cannot be called from here — this module is freestanding
+ * and has no dependency on main.c). Keep the two in step: a scrollbar that
+ * sits 1px off, or a window that keeps the selection somewhere else, reads as
+ * a different list widget on the same device.
+ */
+#define LIST_ROWS  8                   /* visible rows: (240-42)/24 ~= 8 */
+
+static int st_scroll_window(int sel, int total, int visible)
+{
+    if (total <= visible) return 0;
+    int start = sel - visible / 3;     /* selection sits ~1/3 down */
+    if (start < 0) start = 0;
+    if (start > total - visible) start = total - visible;
+    return start;
+}
+
+static void st_scrollbar(int y0, int top, int visible, int total)
+{
+    if (total <= visible) {
+        return;                        /* everything fits: no bar at all */
+    }
+    int track_y = y0;
+    int track_h = LCD_HEIGHT - y0 - 4;
+    console_fill_rect(LCD_WIDTH - 4, track_y, 3, track_h, S_SB_TRK);
+    int thumb_h = (visible * track_h) / total;
+    if (thumb_h < 16) thumb_h = 16;
+    int denom = total - visible;
+    if (denom < 1) denom = 1;
+    int thumb_y = track_y + (top * (track_h - thumb_h)) / denom;
+    console_fill_rect(LCD_WIDTH - 4, thumb_y, 3, thumb_h, S_SB_THMB);
+}
+
 static void list_render(int screen, const settings_t *s, int sel)
 {
-    int n = settings_count(screen);
-    for (int r = 0; r < n; r++) {
-        int ry = LIST_Y0 + r * ROW_H;
+    int n   = settings_count(screen);
+    /* Sliders are double-height, so a slider screen shows fewer rows. Only
+     * Sound is all-sliders and it has 4 rows, which fits either way; the
+     * window maths below is row-count based and stays correct regardless. */
+    int top = st_scroll_window(sel, n, LIST_ROWS);
+    int end = top + LIST_ROWS;
+    if (end > n) end = n;
+    st_scrollbar(LIST_Y0, top, LIST_ROWS, n);
+    for (int r = top; r < end; r++) {
+        int vr = r - top;                      /* visible row index */
+        int ry = LIST_Y0 + vr * ROW_H;
         int is_sel = (r == sel);
         if (is_sel) {
-            sel_bar(LIST_Y0, ROW_H, r);
+            sel_bar(LIST_Y0, ROW_H, vr);
         }
 
         int kind = settings_kind(screen, r);
