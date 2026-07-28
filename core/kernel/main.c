@@ -2674,6 +2674,49 @@ static void settings_render_cur(void)
                                  " some items not shown",
                              FONT_SMALL, BATT_LOW_RED);
         }
+        /*
+         * Settings-file state, and the two absolute LBAs config_save() would
+         * write to.
+         *
+         * This is the ONLY way to perform the mandatory pre-write safety check
+         * on this device. tools/make_config.py's procedure says to boot, read
+         * the LBA the firmware reports, and confirm it matches the address the
+         * host independently computed BEFORE letting anything be written —
+         * "a mismatch there is the bug that overwrites somebody's music
+         * library". That procedure assumes UART, and there is no serial cable
+         * here, so the number has to reach the user's eyes on the panel.
+         *
+         * config_probe_lba() resolves fresh, exactly as a save would; it does
+         * not report a cached value. Read-only: nothing here writes.
+         */
+        {
+            char ln[48];
+            int  k = 0;
+            uint32_t lba0 = 0, lba1 = 0;
+            int ok0 = (config_probe_lba(0, &lba0) == 0);
+            int ok1 = (config_probe_lba(1, &lba1) == 0);
+            for (const char *q = "CFG "; *q; q++) ln[k++] = *q;
+            if (!config_writable()) {
+                for (const char *q = "not writable"; *q; q++) ln[k++] = *q;
+                ln[k] = '\0';
+                ui_text_centered(g_lib_truncated ? 100 : 92, ln,
+                                 FONT_SMALL, LINEN_MUTED_D);
+            } else {
+                for (const char *q = "seq "; *q; q++) ln[k++] = *q;
+                k += u32_to_dec(ln + k, config_seq());
+                ln[k] = '\0';
+                ui_text_centered(g_lib_truncated ? 100 : 92, ln,
+                                 FONT_SMALL, LINEN_MUTED_D);
+                k = 0;
+                for (const char *q = "LBA "; *q; q++) ln[k++] = *q;
+                k += u32_to_dec(ln + k, ok0 ? lba0 : 0);
+                ln[k++] = ' '; ln[k++] = '/'; ln[k++] = ' ';
+                k += u32_to_dec(ln + k, ok1 ? lba1 : 0);
+                ln[k] = '\0';
+                ui_text_centered(g_lib_truncated ? 110 : 102, ln,
+                                 FONT_SMALL, LINEN_MUTED_D);
+            }
+        }
         if (g_lib_load_ms) {
             /* Boot library load time. The one long wait at startup, and it is
              * seek-bound, so having the number on screen is what makes a change
