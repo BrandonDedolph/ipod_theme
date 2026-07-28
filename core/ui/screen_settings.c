@@ -389,3 +389,91 @@ void settings_about_render(int battery_pct, int battery_mv,
         }
     }
 }
+
+/* Format milliseconds as "W.Fs" (one decimal), or "--" for an unmeasured 0. */
+static void fmt_ms(char *d, uint32_t ms)
+{
+    if (ms == 0) { su_copy(d, "--"); return; }
+    int i = su_to_str(d, ms / 1000u);
+    d[i++] = '.';
+    d[i++] = (char)('0' + (ms / 100u) % 10u);
+    d[i++] = 's';
+    d[i]   = '\0';
+}
+
+/*
+ * Boot Details — the cold-boot phase breakdown plus the settings-file locator.
+ *
+ * Split off About deliberately. About is the "what is this device" dashboard;
+ * these are diagnostics, and the CFG rows had already been squeezed into a gap
+ * there (an earlier attempt at y=92/102 landed on top of the stat columns).
+ *
+ * The phases are shown as measured, and TOTAL is measured independently rather
+ * than summed — so a phase nobody instrumented shows up as the difference
+ * between TOTAL and the rows above it, instead of quietly disappearing.
+ */
+void settings_diag_render(uint32_t total_ms, uint32_t lcd_ms, uint32_t disk_ms,
+                          uint32_t lib_ms, uint32_t resume_ms,
+                          int cfg_writable, uint32_t cfg_seq,
+                          uint32_t lba0, uint32_t lba1)
+{
+    char v[48];
+    console_clear(S_SURFACE);
+    header_render("Boot Details", "", 1);
+
+    /* --- total, as the hero number --- */
+    fmt_ms(v, total_ms);
+    st_text((LCD_WIDTH - text_width(v, F_BIG)) / 2, 66, v, F_BIG, S_INK);
+    st_text((LCD_WIDTH - text_width("COLD BOOT", F_SMALL)) / 2, 82,
+            "COLD BOOT", F_SMALL, S_MUTED);
+    console_fill_rect(16, 94, LCD_WIDTH - 32, 1, S_BORDER);
+
+    /* --- per-phase rows --- */
+    static const char *const PH[4] = { "LCD / BCM", "DISK + MOUNT",
+                                       "LIBRARY", "RESUME" };
+    uint32_t phv[4] = { lcd_ms, disk_ms, lib_ms, resume_ms };
+    uint32_t known  = 0;
+    for (int i = 0; i < 4; i++) {
+        int y = 112 + i * 18;
+        st_text(16, y, PH[i], F_SMALL, S_MUTED);
+        fmt_ms(v, phv[i]);
+        st_text_right(16, y, v, F_SUB, S_INK);
+        known += phv[i];
+    }
+
+    /* "OTHER" is the honest remainder: clock/cache/timer bring-up, i2c, the
+     * splash, and anything we forgot to time. If this row is large, that is
+     * where the next optimisation lives. */
+    {
+        int y = 112 + 4 * 18;
+        uint32_t other = (total_ms > known) ? total_ms - known : 0;
+        st_text(16, y, "OTHER", F_SMALL, S_MUTED2);
+        fmt_ms(v, other);
+        st_text_right(16, y, v, F_SUB, S_MUTED_D);
+    }
+
+    console_fill_rect(16, 196, LCD_WIDTH - 32, 1, S_BORDER);
+
+    /*
+     * Settings-file state and the two absolute LBAs config_save() writes to.
+     * This is the ONLY way to run the mandatory pre-write safety check on this
+     * device: tools/make_config.py says to boot, read the LBA the firmware
+     * reports, and confirm it matches the host's independently computed address
+     * BEFORE anything is written — "a mismatch there is the bug that overwrites
+     * somebody's music library". That procedure assumes a serial cable, and
+     * there is none here, so the number has to reach the user's eyes on the
+     * panel. Read-only: nothing on this screen writes.
+     */
+    st_text(16, 212, "CONFIG", F_SMALL, S_MUTED);
+    if (!cfg_writable) {
+        st_text_right(16, 212, "not writable", F_SUB, S_MUTED_D);
+    } else {
+        su_copy(v, "seq ");
+        su_to_str(v + 4, cfg_seq);
+        st_text_right(16, 212, v, F_SUB, S_INK);
+        int i = su_to_str(v, lba0);
+        su_copy(v + i, " / ");
+        su_to_str(v + i + 3, lba1);
+        st_text_right(16, 228, v, F_SMALL, S_MUTED_D);
+    }
+}

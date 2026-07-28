@@ -499,6 +499,31 @@ static int         g_albumview_n;
 static int         g_lib_truncated;
 static uint32_t     g_lib_load_ms;   /* boot library load time, shown on About */
 
+/*
+ * Boot phase breakdown, all milliseconds, all shown on the About screen. The
+ * library load already had a number; the other 8-ish seconds of a cold boot
+ * did not, so "make it boot faster" had nowhere to aim. Same reasoning as
+ * g_lib_load_ms: a number on the panel is what makes a change here verifiable
+ * instead of a matter of impression.
+ *
+ * g_boot_t0_us is stamped once, as early as the timer allows, and every phase
+ * is measured against the live USEC_TIMER rather than accumulated, so a phase
+ * we forget to instrument shows up as the gap in the total rather than
+ * silently vanishing.
+ */
+static uint32_t     g_boot_t0_us;    /* stamped right after timer_init        */
+static uint32_t     g_boot_lcd_ms;   /* lcd_init(): cold BCM bring-up         */
+static uint32_t     g_boot_disk_ms;  /* ata_init + first read + FAT32 mount   */
+static uint32_t     g_boot_resume_ms;/* resume_restore(): readdir + open+seek */
+static uint32_t     g_boot_total_ms; /* to the first UI paint                 */
+
+/* ms since g_boot_t0_us (USEC_TIMER wraps; the subtraction is unsigned so a
+ * wrap mid-boot still yields the right delta). */
+static uint32_t boot_ms_now(void)
+{
+    return (mmio_read32(USEC_TIMER_ADDR) - g_boot_t0_us) / 1000u;
+}
+
 /* Album art (folder.art) location captured while enumerating the current
  * folder; handed to player_play_queue so the player owns/validates it. */
 static uint32_t g_art_clus, g_art_size;
@@ -2674,66 +2699,19 @@ static void settings_render_cur(void)
                                  " some items not shown",
                              FONT_SMALL, BATT_LOW_RED);
         }
-        /*
-         * Settings-file state, and the two absolute LBAs config_save() would
-         * write to.
-         *
-         * This is the ONLY way to perform the mandatory pre-write safety check
-         * on this device. tools/make_config.py's procedure says to boot, read
-         * the LBA the firmware reports, and confirm it matches the address the
-         * host independently computed BEFORE letting anything be written —
-         * "a mismatch there is the bug that overwrites somebody's music
-         * library". That procedure assumes UART, and there is no serial cable
-         * here, so the number has to reach the user's eyes on the panel.
-         *
-         * config_probe_lba() resolves fresh, exactly as a save would; it does
-         * not report a cached value. Read-only: nothing here writes.
-         */
-        {
-            /* About's own rows sit at 62 / 100 / 116 / 150 / 176 / 212
-             * (ui/screen_settings.c), so these two go in the clear gap between
-             * STORAGE and BATTERY. The first attempt used 92/102 and landed on
-             * top of the stat columns. */
-            #define CFG_ROW_Y 190
-            char ln[48];
-            int  k = 0;
-            uint32_t lba0 = 0, lba1 = 0;
-            int ok0 = (config_probe_lba(0, &lba0) == 0);
-            int ok1 = (config_probe_lba(1, &lba1) == 0);
-            for (const char *q = "CFG "; *q; q++) ln[k++] = *q;
-            if (!config_writable()) {
-                for (const char *q = "not writable"; *q; q++) ln[k++] = *q;
-                ln[k] = '\0';
-                ui_text_centered(CFG_ROW_Y, ln, FONT_SMALL, LINEN_MUTED_D);
-            } else {
-                for (const char *q = "seq "; *q; q++) ln[k++] = *q;
-                k += u32_to_dec(ln + k, config_seq());
-                ln[k] = '\0';
-                ui_text_centered(CFG_ROW_Y, ln, FONT_SMALL, LINEN_MUTED_D);
-                k = 0;
-                for (const char *q = "LBA "; *q; q++) ln[k++] = *q;
-                k += u32_to_dec(ln + k, ok0 ? lba0 : 0);
-                ln[k++] = ' '; ln[k++] = '/'; ln[k++] = ' ';
-                k += u32_to_dec(ln + k, ok1 ? lba1 : 0);
-                ln[k] = '\0';
-                ui_text_centered(CFG_ROW_Y + 12, ln, FONT_SMALL, LINEN_MUTED_D);
-            }
-        }
-        if (g_lib_load_ms) {
-            /* Boot library load time. The one long wait at startup, and it is
-             * seek-bound, so having the number on screen is what makes a change
-             * here verifiable rather than a matter of impression. */
-            char lt[32];
-            int  k = 0;
-            for (const char *q = "Library loaded in "; *q; q++) lt[k++] = *q;
-            k += u32_to_dec(lt + k, g_lib_load_ms / 1000u);
-            lt[k++] = '.';
-            lt[k++] = (char)('0' + (g_lib_load_ms / 100u) % 10u);
-            lt[k++] = 's';
-            lt[k]   = '\0';
-            ui_text_centered(g_lib_truncated ? 90 : 80, lt,
-                             FONT_SMALL, LINEN_MUTED_D);
-        }
+    } else if (g_set_screen == SETTINGS_DIAG) {
+        /* Boot Details owns the diagnostics now: the cold-boot phase
+         * breakdown and the settings-file locator. They used to be squeezed
+         * into About's spare gaps, which is how the CFG rows ended up on top
+         * of the stat columns. main.c resolves the LBAs here because
+         * config_probe_lba() must resolve FRESH, exactly as a save would,
+         * rather than reporting something cached. Read-only. */
+        uint32_t lba0 = 0, lba1 = 0;
+        (void)config_probe_lba(0, &lba0);
+        (void)config_probe_lba(1, &lba1);
+        settings_diag_render(g_boot_total_ms, g_boot_lcd_ms, g_boot_disk_ms,
+                             g_lib_load_ms, g_boot_resume_ms,
+                             config_writable(), config_seq(), lba0, lba1);
     } else {
         settings_render(g_set_screen, &g_settings, g_set_sel);
     }
@@ -4245,7 +4223,13 @@ _Noreturn static void run_ui(fat32_t *fs)
      * after library_ensure (the locator is resolved against the library). Comes
      * up PAUSED; nothing here starts audio. A no-op when Resume is off, when
      * nothing was saved, or when the saved track can't be resolved. */
+    uint32_t resume_t0 = boot_ms_now();
     resume_restore(fs);
+    g_boot_resume_ms   = boot_ms_now() - resume_t0;
+    /* Everything the user waits for is now done; the next thing that happens is
+     * the first UI paint. Stamped here rather than after the present so the
+     * number means "time until the device was ready", not "+1 frame". */
+    g_boot_total_ms    = boot_ms_now();
     g_cfg_dirty = 0;                      /* loading is not a change to save back */
     g_scr_n = 0;
     scr_push(SCR_MENU);
@@ -4781,6 +4765,7 @@ _Noreturn static void run_ui(fat32_t *fs)
                         case SETTINGS_ENTER_ABOUT:    target = SETTINGS_ABOUT;    break;
                         case SETTINGS_ENTER_THEME:    target = SETTINGS_THEME;    break;
                         case SETTINGS_ENTER_CLICKER:  target = SETTINGS_CLICKER;  break;
+                        case SETTINGS_ENTER_DIAG:     target = SETTINGS_DIAG;     break;
                         default: break;
                         }
                         if (target >= 0) {                 /* descend a screen  */
@@ -5303,13 +5288,12 @@ _Noreturn void kernel_main(void) {
     timer_init();
     arch_irq_enable();
 
-    uart_puts("core: tick ");
-    uart_put_hex32(current_tick());
-    uart_puts(" (pre-sleep)\n");
-    sleep_ms(100);
-    uart_puts("core: tick ");
-    uart_put_hex32(current_tick());
-    uart_puts(" (post-sleep, ~+10)\n");
+    /* Boot clock starts here — the earliest point with a running timer. */
+    g_boot_t0_us = mmio_read32(USEC_TIMER_ADDR);
+
+    /* (A tick self-test used to sleep 100 ms here to prove the IRQ-fed tick
+     * advanced. It did its job during bring-up; on a cold boot it is 100 ms of
+     * a 10 s startup spent proving something the scheduler exercises anyway.) */
 
     /*
      * Backlight FIRST — before the LCD probe, deliberately.
@@ -5340,7 +5324,10 @@ _Noreturn void kernel_main(void) {
      * hardware. The clicky emulator has no BCM (lcd_init() false there), so
      * this block is skipped, keeping the emulator smoke green; the register
      * grammar is proven host-side by the mock-bus trace tests. */
-    if (lcd_init()) {
+    uint32_t lcd_t0 = boot_ms_now();
+    int      lcd_ok = lcd_init();
+    g_boot_lcd_ms   = boot_ms_now() - lcd_t0;
+    if (lcd_ok) {
         /* Boost to 80 MHz for the whole disk/decode path. The UI runs here too;
          * we never drop back because the browser never returns (fine for
          * bring-up — the device is on a cable during testing). */
@@ -5364,6 +5351,12 @@ _Noreturn void kernel_main(void) {
         uint32_t sig = 0, fat_lba = 0;
         int      mnt = -1;
         fat32_t  fs;
+        /* Everything from here to the end of fat32_mount is "the disk": the
+         * IDE reset, the first read (which is what actually spins the platters
+         * up, and is allowed 4 s for it — see ATA_SPINUP_US), and the mount's
+         * own reads. Timed as one phase because that is the unit we could move
+         * or overlap; splitting it finer would not change what we can do. */
+        uint32_t disk_t0 = boot_ms_now();
         if (ata_init() == 0 && ata_read_sectors(0, 1, mbr) == 0) {
             sig = (uint32_t)mbr[510] | ((uint32_t)mbr[511] << 8);
             for (int p = 0; p < 4; p++) {
@@ -5384,6 +5377,8 @@ _Noreturn void kernel_main(void) {
                 mnt = fat32_mount(&fs, player_disk_read, 0, fat_lba * 4u);
             }
         }
+
+        g_boot_disk_ms = boot_ms_now() - disk_t0;
 
         uint32_t btus = mmio_read32(USEC_TIMER_ADDR) - boot_us0;
         uart_puts("core: mount rc ");

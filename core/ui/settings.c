@@ -123,9 +123,9 @@ static int bl_step(int secs, int dir, int wrap)
 /* Only rows that actually do something are listed — the cosmetic placeholders
  * (Crossfade, Replaygain, Skip Length, Stereo Width, Shortcuts, Language) were
  * removed so the menu never presents a control that has no effect. */
-static const char *const ROOT_L[8] = {
+static const char *const ROOT_L[9] = {
     "Playback", "Sound", "Theme", "Display", "Clicker", "About",
-    "Disk Mode", "Reset Settings",
+    "Boot Details", "Disk Mode", "Reset Settings",
 };
 /* Resume is back on this list: it was pulled with the other placeholders while
  * nothing could persist it, and it is now the switch that decides whether boot
@@ -168,11 +168,12 @@ void settings_defaults(settings_t *s)
 int settings_count(int screen)
 {
     switch (screen) {
-    case SETTINGS_ROOT:     return 8;
+    case SETTINGS_ROOT:     return 9;
     case SETTINGS_PLAYBACK: return 3;
     case SETTINGS_SOUND:    return 4;
     case SETTINGS_DISPLAY:  return 2;
     case SETTINGS_ABOUT:    return 1;   /* non-interactive info page */
+    case SETTINGS_DIAG:     return 1;   /* non-interactive info page */
     case SETTINGS_THEME:    return 2;
     case SETTINGS_CLICKER:  return CLICK_N;   /* Off + sound profiles */
     default:                return 0;
@@ -216,7 +217,7 @@ int settings_kind(int screen, int idx)
     switch (screen) {
     case SETTINGS_ROOT:
         /* Disk Mode + Reset Settings both fire on SELECT; the rest descend. */
-        if (idx == 6 || idx == 7) return SETTINGS_KIND_ACTION;
+        if (idx == 7 || idx == 8) return SETTINGS_KIND_ACTION;
         return SETTINGS_KIND_SUBMENU;                 /* incl. Clicker submenu */
     case SETTINGS_CLICKER:
         return SETTINGS_KIND_SELECT;                  /* radio pick, marked active */
@@ -229,6 +230,7 @@ int settings_kind(int screen, int idx)
     case SETTINGS_THEME:
         return SETTINGS_KIND_THEME;
     case SETTINGS_ABOUT:
+    case SETTINGS_DIAG:
         return SETTINGS_KIND_INFO;
     default:
         return SETTINGS_KIND_SELECT;
@@ -314,8 +316,9 @@ int settings_activate(int screen, settings_t *s, int idx)
         case 3: return SETTINGS_ENTER_DISPLAY;
         case 4: return SETTINGS_ENTER_CLICKER;
         case 5: return SETTINGS_ENTER_ABOUT;
-        case 6: return SETTINGS_ACTION_DISKMODE;
-        case 7: return SETTINGS_ACTION_RESET;
+        case 6: return SETTINGS_ENTER_DIAG;
+        case 7: return SETTINGS_ACTION_DISKMODE;
+        case 8: return SETTINGS_ACTION_RESET;
         default: return SETTINGS_ACTION_NONE;
         }
 

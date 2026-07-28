@@ -98,6 +98,14 @@ typedef enum {
     SETTINGS_ABOUT,      /* device info key/value rows                        */
     SETTINGS_THEME,      /* theme picker (swatch rows)                        */
     SETTINGS_CLICKER,    /* clicker profile picker (Off / sound profiles)     */
+    /*
+     * Boot Details: the cold-boot phase breakdown and the settings-file
+     * locator. Diagnostics, deliberately on their own page — About is the
+     * "what is this device" screen a user reads, and hex LBAs were crowding
+     * it (they collided with the stat columns outright). Non-interactive,
+     * rendered wholly by main.c, which is the only place that has the numbers.
+     */
+    SETTINGS_DIAG,
     SETTINGS_SCREEN_COUNT
 } settings_screen_t;
 
@@ -114,6 +122,7 @@ typedef enum {
     SETTINGS_ENTER_ABOUT,
     SETTINGS_ENTER_THEME,
     SETTINGS_ENTER_CLICKER,
+    SETTINGS_ENTER_DIAG,
     SETTINGS_ACTION_RESET,
     /* Reboot into the Apple boot ROM's USB mass-storage mode. Lives under
      * Settings rather than the main menu: it is a maintenance action, not a
@@ -197,5 +206,17 @@ void settings_render(int screen, const settings_t *s, int sel);
 void settings_about_render(int battery_pct, int battery_mv,
                            uint32_t total_mb, uint32_t free_mb,
                            int n_songs, int n_albums, int n_artists);
+
+/*
+ * Render the Boot Details screen (SETTINGS_DIAG). All times are milliseconds
+ * as MEASURED — a 0 renders as "--" rather than a fake zero, and the screen
+ * derives "OTHER" as total minus the named phases so unmeasured time is
+ * visible instead of lost. lba0/lba1 are the absolute sectors config_save()
+ * would write; cfg_writable 0 renders the locator as "not writable".
+ */
+void settings_diag_render(uint32_t total_ms, uint32_t lcd_ms, uint32_t disk_ms,
+                          uint32_t lib_ms, uint32_t resume_ms,
+                          int cfg_writable, uint32_t cfg_seq,
+                          uint32_t lba0, uint32_t lba1);
 
 #endif /* CORE_UI_SETTINGS_H */
