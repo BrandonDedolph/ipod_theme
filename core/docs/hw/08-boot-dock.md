@@ -61,10 +61,26 @@ hibernation image).
 ### Checksum algorithm
 
 ```c
-u32 chksum = MODEL_NUM;             // 0x05 for iPod Video
+u32 chksum = 0;                     // NOT seeded with MODEL_NUM — see below
 for (size_t i = 0; i < len; i++)
     chksum += image[i];             // simple additive, 32-bit wrap
 ```
+
+**Measured on the device, 2026-07-27.** This file previously said the sum
+was seeded with `MODEL_NUM` (0x05 for the Video). It is not. Two
+independent checks on a real 5.5G firmware partition:
+
+- Apple's own untouched `RSRC` entry: recomputing the plain sum over its
+  body gives `0x18319bab`, exactly the `chksum` in its directory entry.
+  A `MODEL_NUM` seed would be off by 5.
+- Our own OSOS image written by `ipodpatcher -wf`: plain sum
+  `0x01589d64`, matching its entry byte-for-byte.
+
+Also corrected: an image's body starts at **`devOffset + 0x800`** within
+the firmware partition, not `+0x200`. Located by searching the partition
+dump for the first 64 bytes of the image we had just written, then
+confirmed by checksumming an image we had never touched at the same
+delta.
 
 For `.ipod`-format files (used by ipodpatcher to ship a packaged
 image): the 32-bit checksum is stored big-endian as the first 4
