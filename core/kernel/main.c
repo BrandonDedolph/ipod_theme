@@ -3793,6 +3793,227 @@ static int wheel_move(int sel, int count, int8_t delta, int *accum)
     return sel;
 }
 
+/* ---------------------------------------------------------------------------
+ * Resume playback position across a power cycle.
+ *
+ * WHAT IS STORED, AND WHY IT IS A NAME
+ *
+ * settings_t carries three fields (resume_hash / resume_secs / resume_total)
+ * that ride along in the CORECFG.DAT record. The locator is the folded
+ * name_hash() of the track's ext-trimmed FILENAME — not a queue index, not a
+ * song index, not a cluster. Every one of those is a statement about the
+ * library as it happened to be laid out when we saved: re-import the music,
+ * rebuild CORELIB.IDX, add one album, and index 412 is a different song while
+ * cluster 918233 may be somebody else's file. The filename is the only handle
+ * that means the same thing on the other side of a rebuild, which is exactly
+ * why the library already binds records to files by this same hash.
+ *
+ * A name is not unique, though — "01 Intro.flac" lives in half the albums on a
+ * real library — so resume_total (the decoder's track length) is kept as a
+ * cross-check and the restore declines an ambiguous match outright. Resuming
+ * nothing is a shrug; resuming the WRONG track is a bug.
+ *
+ * WHEN IT IS CAPTURED (the write budget)
+ *
+ * Never per second, and never per pass. The position is snapshotted only at
+ * moments where it actually changed in a way worth a kilobyte of disk:
+ *
+ *   - the track changed (player_open_seq bumped) — the important half is
+ *     WHICH track, and that is the only moment it moves;
+ *   - pause/unpause — the "I'm putting this down" moment;
+ *   - playback started or stopped;
+ *   - otherwise at most once per RESUME_SAMPLE_US while a track plays, so a
+ *     battery pull mid-album loses minutes, not the album;
+ *   - forced on the way into suspend / PMU standby, before the drive parks.
+ *
+ * Each of those calls settings_touch(), so it inherits the existing debounce
+ * AND the "don't spin the platters up for 1 KB" guard in settings_commit() —
+ * a capture during playback rides out on the next anti-skip refill rather than
+ * costing its own spin-up. Continuous playback therefore costs roughly one
+ * write per track (~20/hour); an idle or paused device costs none.
+ * ------------------------------------------------------------------------- */
+
+/* Longest a single track may play before we re-stamp the position. 5 minutes:
+ * a full-album track rarely outlives it, so in practice the track-change edge
+ * is what fires and this is only the backstop for long mixes and podcasts. */
+#define RESUME_SAMPLE_US   300000000u          /* 300 s */
+
+/* Below this, don't bother restoring a position — the user is at the top of
+ * the track for any purpose they'd notice, and it saves a seek. */
+#define RESUME_MIN_SECS    10u
+
+/* How far the library's indexed duration may differ from the decoder's before
+ * we stop believing the two describe the same file. Both are truncated to
+ * whole seconds from different sources, so they disagree by a second on
+ * perfectly good matches. */
+#define RESUME_DUR_SLOP    2u
+
+static uint32_t g_resume_open_seq;      /* player_open_seq() when last captured */
+static uint32_t g_resume_last_us;       /* when we last considered capturing    */
+static int      g_resume_was_paused;    /* pause state when last captured       */
+
+/*
+ * Snapshot the playing track + position into g_settings (debounced onto disk
+ * by settings_commit). Cheap and idempotent: re-capturing the same track at
+ * the same second does not mark anything dirty, so the callers below can be
+ * liberal about when they call it.
+ */
+static void resume_capture(void)
+{
+    if (!g_settings.resume_on_startup) {
+        /* Switched off: don't merely stop recording — drop what is already
+         * stored. Otherwise turning it back on next month resumes whatever the
+         * user was listening to before they turned it off, which reads as the
+         * device remembering something it was told to forget. */
+        if (g_settings.resume_hash != 0) {
+            g_settings.resume_hash  = 0;
+            g_settings.resume_secs  = 0;
+            g_settings.resume_total = 0;
+            settings_touch();
+        }
+        return;
+    }
+    if (!player_active()) {
+        return;                        /* nothing loaded — keep the last one */
+    }
+    const char *nm = player_track_name();
+    if (nm == 0 || nm[0] == '\0') {
+        return;
+    }
+
+    uint32_t h = name_hash(nm);
+    uint32_t e = player_elapsed_s();
+    if (h == g_settings.resume_hash && e == g_settings.resume_secs) {
+        return;                        /* nothing moved — no write to schedule */
+    }
+    g_settings.resume_hash  = h;
+    g_settings.resume_secs  = e;
+    g_settings.resume_total = player_total_s();
+    settings_touch();
+}
+
+/*
+ * Find the library song whose ext-trimmed filename folds to `hash`. Returns a
+ * g_songs index, or -1 when there is no safe answer.
+ *
+ * "Safe" is the whole point. A name match that the duration also confirms is
+ * taken immediately. A name match with no confirmation is taken only when the
+ * name is UNIQUE across the library — otherwise we would be picking one of
+ * several "01 Intro.flac" at random, and a coin-flip is not a resume.
+ *
+ * One linear pass over g_songs at boot: ~6000 short hashes, single-digit
+ * milliseconds, against a library load that already took seconds.
+ */
+static int resume_find_song(uint32_t hash, uint32_t total_s)
+{
+    int best = -1, n_named = 0;
+
+    for (int i = 0; i < g_songs_n; i++) {
+        if (name_hash(g_songs[i].file) != hash) {
+            continue;
+        }
+        n_named++;
+        if (!g_songs[i].file_clus) {
+            continue;                  /* indexed but not on the disk any more */
+        }
+        uint32_t d = g_songs[i].duration_s;
+        if (d != 0 && total_s != 0 &&
+            d + RESUME_DUR_SLOP >= total_s && total_s + RESUME_DUR_SLOP >= d) {
+            return i;                  /* name AND length agree — this is it */
+        }
+        if (best < 0) {
+            best = i;
+        }
+    }
+    return (n_named == 1) ? best : -1;
+}
+
+/*
+ * Re-open the saved track at the saved position, PAUSED, at boot.
+ *
+ * Three things this deliberately does NOT do:
+ *
+ *   - it does not play. Coming back on and having music start on its own is
+ *     hostile, so the transport is left paused with the position already set;
+ *     the user presses PLAY. The codec is muted across the open because
+ *     player_open_current() unconditionally starts the DAC off a primed ring —
+ *     without the mute there is a click between the open and the pause;
+ *   - it does not guess. Any failure at any step — setting off, no locator, no
+ *     unambiguous song, the album folder no longer lists the file, the open
+ *     falling through to a different track — leaves the device exactly as if
+ *     nothing had been saved;
+ *   - it does not seek an MP3. dr_mp3 has no seek table and scans from the
+ *     start, which for a podcast resumed at 50 minutes is a multi-second
+ *     freeze on the boot path. FLAC seeks through its SEEKTABLE in O(log n),
+ *     so it gets the position and MP3 gets the track cued at 0:00.
+ */
+static void resume_restore(fat32_t *fs)
+{
+    if (!g_settings.resume_on_startup || g_settings.resume_hash == 0) {
+        return;
+    }
+    int si = resume_find_song(g_settings.resume_hash, g_settings.resume_total);
+    if (si < 0) {
+        return;                        /* deleted, renamed, or ambiguous */
+    }
+
+    /*
+     * Rebuild the queue as the track's ALBUM — the context Next/Prev should
+     * walk, and the one context we can reconstruct honestly. The real queue
+     * might have been a shuffle of the whole library or a genre view; none of
+     * that survives a power cut, and inventing it would be a worse lie than
+     * the album the track actually lives in.
+     *
+     * browse_collect() only lists FILES at depth 1 (depth 0 is the album
+     * list), so borrow the depth for the read and hand it straight back.
+     */
+    int saved_depth = g_dir_depth;
+    g_dir_depth = 1;
+    browse_load(fs, g_songs[si].dir_clus);
+    g_dir_depth = saved_depth;
+
+    int idx = -1;
+    for (int i = 0; i < g_browse_n; i++) {
+        if (!g_browse[i].is_dir &&
+            name_hash(g_browse[i].name) == g_settings.resume_hash) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        g_browse_n = 0;                /* the folder no longer holds the file */
+        return;
+    }
+
+    /* Mute BEFORE the open: audio_bringup() re-latches whatever gain the HAL
+     * currently holds, so a 0 here means the DAC comes up silent and the pause
+     * lands before a single audible sample. Restored at the bottom. */
+    hal_volume_set(0);
+    player_play_queue(g_browse, g_browse_n, idx, g_art_clus, g_art_size);
+    player_pause();
+
+    /* player_play_queue() skips forward over a track it cannot open. That is
+     * right for a user pressing SELECT and wrong for a silent restore — being
+     * handed a different song than the one you left is precisely the failure
+     * this whole path is written to avoid. */
+    if (!player_active() || player_queue_current() != idx) {
+        player_stop();
+        hal_volume_set(g_volume);
+        return;
+    }
+
+    if (g_browse[idx].fmt == 0 && g_settings.resume_secs >= RESUME_MIN_SECS) {
+        /* Clamped to the track length inside player_seek_to, and a refusal is
+         * simply "resumed at 0:00" — never a reason to abandon the track. */
+        (void)player_seek_to(g_settings.resume_secs);
+    }
+    hal_volume_set(g_volume);
+
+    /* Put the cursor on Now Playing: it is the row this whole feature exists
+     * to make one click away, and it only appears while a track is loaded. */
+    g_main_sel = MM_NOWPLAYING;
+}
+
 /* Render whatever screen is on top of the stack into the framebuffer (no
  * present) — used to paint context behind the lock/unlock plate. */
 static void paint_current_screen(void)
@@ -3823,6 +4044,9 @@ static void paint_current_screen(void)
  * boot path (a cold boot of the firmware, not a resume). */
 _Noreturn static void enter_standby(void)
 {
+    /* BEFORE player_stop(): once the transport is torn down there is no track
+     * name and no elapsed clock left to record. */
+    resume_capture();
     player_stop();
     settings_commit(1);                   /* persist before the PMU cuts power */
     console_clear(0x0000);                /* blank BEFORE the power cut so no */
@@ -3856,7 +4080,10 @@ static void suspend_to_ram(uint32_t play_down_us)
     }
     /* Last chance to persist: after this the drive is parked and the user may
      * never wake the device again (battery pull, dead cell). Forced, so a
-     * change made 1 s ago is not lost to the debounce. */
+     * change made 1 s ago is not lost to the debounce. The position goes in
+     * the same write — the pause above froze the elapsed clock, so this is the
+     * exact second the user stopped listening. */
+    resume_capture();
     settings_commit(1);
     cpu_unboost();                        /* the boost refcount is >=1 here (we are
                                            * entered from BL_FULL), so without this
@@ -4013,6 +4240,12 @@ _Noreturn static void run_ui(fat32_t *fs)
     uart_put_hex32(cfg_lba1);
     uart_putc('\n');
     settings_apply();                     /* push shuffle/repeat/volume out       */
+    /* Pick up where the user left off — after settings_apply (it needs the
+     * saved volume, which the restore mutes across the open and puts back) and
+     * after library_ensure (the locator is resolved against the library). Comes
+     * up PAUSED; nothing here starts audio. A no-op when Resume is off, when
+     * nothing was saved, or when the saved track can't be resolved. */
+    resume_restore(fs);
     g_cfg_dirty = 0;                      /* loading is not a change to save back */
     g_scr_n = 0;
     scr_push(SCR_MENU);
@@ -4049,8 +4282,15 @@ _Noreturn static void run_ui(fat32_t *fs)
     int      panel_slept = 0;            /* LCD panel put to sleep at backlight-off */
     uint32_t last_input = mmio_read32(USEC_TIMER_ADDR);
 
-    int was_active = 0;                   /* detect the active->idle edge          */
-    int last_qidx  = -1;                  /* queue position at the last pass       */
+    /* Seeded from the LIVE transport, not from zero: a successful resume_restore
+     * has already left a track loaded, and a `was_active` of 0 would read the
+     * first pass as a play->stop edge (closing the codec under a track we just
+     * restored) and as a fresh capture of a position we only just loaded. */
+    int was_active = player_active();     /* detect the active->idle edge          */
+    int last_qidx  = was_active ? player_queue_current() : -1;
+    g_resume_open_seq   = player_open_seq();
+    g_resume_was_paused = player_paused();
+    g_resume_last_us    = mmio_read32(USEC_TIMER_ADDR);
     for (;;) {
         /* Time the pump: when it returns in a few microseconds the decode step
          * produced nothing (PCM ring full) and the disk buffer isn't filling —
@@ -4074,6 +4314,25 @@ _Noreturn static void run_ui(fat32_t *fs)
             dirty = 1;
         }
         last_qidx = now_qidx;
+
+        /* RESUME POSITION — the edges worth a kilobyte of disk (see the block
+         * comment above resume_capture): the track changed, pause flipped,
+         * playback started/stopped, or RESUME_SAMPLE_US has gone by. The
+         * timestamp is stamped HERE and not inside resume_capture, so a pass
+         * where nothing had moved can't re-arm the interval every iteration. */
+        {
+            uint32_t oseq  = player_open_seq();
+            int      paus  = player_paused();
+            uint32_t nowu  = mmio_read32(USEC_TIMER_ADDR);
+            if (now_active != was_active || oseq != g_resume_open_seq ||
+                paus != g_resume_was_paused ||
+                (uint32_t)(nowu - g_resume_last_us) >= RESUME_SAMPLE_US) {
+                resume_capture();
+                g_resume_open_seq   = oseq;
+                g_resume_was_paused = paus;
+                g_resume_last_us    = nowu;
+            }
+        }
 
         /* Queue finished (last track of the album/playlist/song list ended and
          * Repeat is off): no screen may keep showing a dead player. Truncate the
@@ -4565,6 +4824,12 @@ _Noreturn static void run_ui(fat32_t *fs)
                         g_set_accum = 0;
                     } else {
                         scr_pop();                          /* leave Settings    */
+                        /* Resume may have just been switched OFF, and dropping
+                         * the stored locator is part of honouring that. Doing
+                         * it here folds the clear into the commit below instead
+                         * of costing a second write when the interval next
+                         * comes round. */
+                        resume_capture();
                         /* The natural "I'm done" moment: commit now rather than
                          * waiting out the debounce, so the record is on the
                          * platter before the user can reach for the Hold switch. */
