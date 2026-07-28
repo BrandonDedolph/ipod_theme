@@ -87,8 +87,17 @@ KERN_ADJ_MIN, KERN_ADJ_MAX = -128, 127
 # (any-alpha) mean gap around +0.4..+0.7px. Targeting a +1.0px mean instead
 # would need 1.2-1.7px of tracking and reads as deliberately letterspaced.
 TRACKING_PX = {
-    (False,  9): 0.9, (False, 11): 0.9, (False, 13): 0.7,
-    (True,   9): 0.9, (True,  11): 0.9, (True,  13): 0.9, (True, 17): 0.6,
+    # SOLVED, not guessed: tools/text_metrics.py --target 1.45 picks the value
+    # that puts each atlas's mean visual gap at 1.45px, measuring real ink out
+    # of the baked bitmaps with the device's own pen arithmetic.
+    #
+    # They differ wildly because the FACES differ: at 0.91px of tracking
+    # everywhere, the measured mean gap ran from 0.78px (bold 11 — cramped) to
+    # 1.82px (bold 17 — loose). That spread is why the text read as tight in
+    # some places and airy in others at the same time. Equalising the gap
+    # matters more than the absolute number.
+    (False,  9): 0.92, (False, 11): 0.59, (False, 13): 0.86,
+    (True,   9): 1.44, (True,  11): 1.59, (True,  13): 0.64, (True, 17): 0.28,
 }
 TRACKING_DEFAULT = 0.7
 
