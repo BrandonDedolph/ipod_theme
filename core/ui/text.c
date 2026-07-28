@@ -230,6 +230,28 @@ static int kern_adv(const atlas_t *a, int prev_gi, int gi) {
     return 0;
 }
 
+/*
+ * Glyph 0 is U+0020: the atlas bakes PRINTABLE = 0x20..0x7E in order, so index
+ * 0 is the space by construction (tools/atlas_gen.py).
+ *
+ * Tracking is suppressed on either side of a space. The cramping it corrects
+ * is antialiased INK spilling past a glyph's side bearings into its
+ * neighbour's; a space has no ink and already supplies far more daylight than
+ * the fringe can eat. Tracking it anyway would widen every word gap by twice
+ * the tracking — at 9px that is +1.8px on a 2.3px space, a 78% wider word gap
+ * — which reads as deliberately letterspaced text rather than as fixed
+ * spacing. (CSS letter-spacing does track spaces; at 9px on a 320px panel that
+ * is the wrong call.)
+ */
+static int glyph_is_space(int gi) { return gi == 0; }
+
+/* Tracking to insert between `prev_gi` and `gi`, in 26.6. */
+static int track_adv(const atlas_t *a, int prev_gi, int gi) {
+    if (prev_gi < 0 || gi < 0) return 0;          /* string edge / no glyph */
+    if (glyph_is_space(prev_gi) || glyph_is_space(gi)) return 0;
+    return a->tracking;
+}
+
 /* Advance for a codepoint with no atlas glyph (blank or box). */
 static int fallback_advance(const atlas_t *a, int cp) {
     return is_blank_cp(cp) ? a->glyphs[0].advance : notdef_advance(a);
@@ -255,6 +277,7 @@ int text_width(const char *s, const text_font_t *font) {
             prev_gi = -1;              /* no glyph: nothing to kern against */
             continue;
         }
+        w += track_adv(a, prev_gi, gi);
         w += kern_adv(a, prev_gi, gi);
         w += a->glyphs[gi].advance;
         prev_gi = gi;
@@ -346,6 +369,7 @@ static int text_draw_c(uint16_t *fb, int fb_w, int fb_h, int x, int y,
         /* Kern BEFORE the pen is rounded into a position, so the pair's
          * adjustment can actually move this glyph. */
         if (gi >= 0) {
+            pen += track_adv(a, prev_gi, gi);
             pen += kern_adv(a, prev_gi, gi);
         }
         prev_gi = gi;                  /* gi < 0 => nothing to kern against */
@@ -388,6 +412,7 @@ static int text_draw_c(uint16_t *fb, int fb_w, int fb_h, int x, int y,
                     prev_gi = -1;
                     continue;
                 }
+                pen += track_adv(a, prev_gi, gj);
                 pen += kern_adv(a, prev_gi, gj);
                 pen += a->glyphs[gj].advance;
                 prev_gi = gj;

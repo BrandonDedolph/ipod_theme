@@ -2429,6 +2429,7 @@ const atlas_t NUNITO_REGULAR_9 = {
     .data        = NUNITO_REGULAR_9_DATA,
     .kern        = NUNITO_REGULAR_9_KERN,
     .kern_n      = 1742,
+    .tracking    = 58,   // +0.91px letter-spacing
     .ascent      = 10,
     .descent     = 4,
     .line_height = 14,

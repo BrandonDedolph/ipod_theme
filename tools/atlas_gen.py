@@ -70,6 +70,28 @@ KERN_ONE = 1 << KERN_SHIFT
 KERN_MIN_PX = 0.25
 KERN_ADJ_MIN, KERN_ADJ_MAX = -128, 127
 
+# Letter-spacing added between glyphs, in PIXELS, per pixel size.
+#
+# Nunito's antialiased ink is wider than its advances at these sizes — measured
+# mean side bearing is negative everywhere we ship (9px -0.36, 11px -0.13,
+# 13px -0.21), i.e. glyphs touch before any spacing logic is involved. These
+# values restore roughly half a pixel of daylight between letters. Tune here;
+# the device just adds the number.
+# Keyed by (is_bold, px) — NOT by size alone. Bold is fitted tighter than
+# regular at the same size (design RSB 0.040em vs 0.046em) on top of carrying
+# heavier stems, so keying on size under-tracks bold 11/13.
+#
+# Values chosen against a measured criterion rather than by eye: over ~600
+# adjacent letter pairs from 53 real title/artist/menu strings, put fewer than
+# ~3% of pairs' >=50%-alpha glyph CORES in contact, which lands the soft
+# (any-alpha) mean gap around +0.4..+0.7px. Targeting a +1.0px mean instead
+# would need 1.2-1.7px of tracking and reads as deliberately letterspaced.
+TRACKING_PX = {
+    (False,  9): 0.9, (False, 11): 0.9, (False, 13): 0.7,
+    (True,   9): 0.9, (True,  11): 0.9, (True,  13): 0.9, (True, 17): 0.6,
+}
+TRACKING_DEFAULT = 0.7
+
 PRINTABLE = range(0x20, 0x7F)  # 0x20..0x7E inclusive — 95 glyphs
 
 # Non-ASCII glyphs appended AFTER the 95 ASCII glyphs, at fixed indices 95, 96,
@@ -280,6 +302,15 @@ def render_atlas(ttf_path: str, px_size: int, symbol: str) -> str:
     out.append(f"    .data        = {symbol}_DATA,")
     out.append(f"    .kern        = {symbol}_KERN,")
     out.append(f"    .kern_n      = {len(kerns)},")
+    # CORE_TRACKING_PX overrides the table, for sweeping candidate values
+    # against tools/text_preview.c without editing this file.
+    _ovr = os.environ.get("CORE_TRACKING_PX")
+    _bold = "BOLD" in symbol.upper()
+    _tpx = (float(_ovr) if _ovr
+            else TRACKING_PX.get((_bold, px_size), TRACKING_DEFAULT))
+    track = int(round(_tpx * ADV_ONE))
+    out.append(f"    .tracking    = {track},"
+               f"   // {track / ADV_ONE:+.2f}px letter-spacing")
     out.append(f"    .ascent      = {ascent},")
     out.append(f"    .descent     = {descent},")
     out.append(f"    .line_height = {line_h},")

@@ -3251,6 +3251,7 @@ const atlas_t NUNITO_BOLD_11 = {
     .data        = NUNITO_BOLD_11_DATA,
     .kern        = NUNITO_BOLD_11_KERN,
     .kern_n      = 2323,
+    .tracking    = 58,   // +0.91px letter-spacing
     .ascent      = 12,
     .descent     = 4,
     .line_height = 16,

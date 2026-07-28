@@ -3803,6 +3803,7 @@ const atlas_t NUNITO_REGULAR_13 = {
     .data        = NUNITO_REGULAR_13_DATA,
     .kern        = NUNITO_REGULAR_13_KERN,
     .kern_n      = 2650,
+    .tracking    = 45,   // +0.70px letter-spacing
     .ascent      = 14,
     .descent     = 5,
     .line_height = 19,

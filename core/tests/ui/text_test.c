@@ -66,6 +66,30 @@ int main(void) {
     int w_T  = text_width("T",  font);
     int w_o  = text_width("o",  font);
     CHECK(w_To < w_T + w_o, "kerning not applied ('To' not tightened)");
+
+    /*
+     * The clipped tail must agree with text_width() to the pixel.
+     *
+     * text_draw_c() has THREE pen paths: the main loop, the "left of the clip
+     * window" skip, and the "past the right edge" tail that stops rasterizing
+     * but keeps accumulating so the returned pen stays the caller's contract
+     * (the marquee chains on it). Tracking and kerning have to be applied in
+     * all three; getting the tail wrong is invisible until text is clipped,
+     * which is exactly when a marquee is running.
+     *
+     * Drawn entirely to the LEFT of a zero-width window, so every glyph takes
+     * the tail path while the pen must still come out equal to the measure.
+     */
+    {
+        static uint16_t probe[W * H];
+        const char *kerned = "To Ta Ye AV";     /* real kern pairs + spaces */
+        int wk = text_width(kerned, font);
+        /* clip window [0,0) is empty, so every glyph takes the tail path. */
+        int pen_clip = text_draw_clip(probe, W, H, 0, text_ascent(font),
+                                      kerned, font, INK, 0, 0);
+        CHECK(pen_clip == wk,
+              "clipped-tail pen != text_width (tracking/kerning path drift)");
+    }
     CHECK(text_line_height(font) > 0, "line_height not positive");
     CHECK(text_ascent(font) > 0, "ascent not positive");
 

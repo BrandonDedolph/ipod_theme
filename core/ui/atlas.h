@@ -96,6 +96,22 @@ typedef struct {
     const uint8_t       *data;            /* concatenated glyph alpha rows */
     const atlas_kern_t  *kern;            /* sorted by (left<<8)|right */
     uint16_t             kern_n;          /* 0 = no kerning for this face */
+    /*
+     * Letter-spacing added BETWEEN glyphs, in 26.6 — the same units as an
+     * advance.
+     *
+     * Nunito is a rounded display face fitted tightly, and at 9-13px with
+     * grayscale antialiasing its ink spills past its own side bearings: the
+     * measured mean bearing is NEGATIVE at every size we ship (-0.36px at 9px,
+     * -0.13px at 11px, -0.21px at 13px), so neighbouring glyphs touch or
+     * overlap and the text reads as cramped. That is a property of the face at
+     * this size, not a spacing bug — correct advances and correct kerning both
+     * still land ink against ink.
+     *
+     * Tracking is the dial that fixes it, and it is deliberately per-atlas:
+     * small sizes need proportionally more.
+     */
+    int16_t              tracking;
     int8_t               ascent;          /* px above baseline */
     int8_t               descent;         /* px below baseline (positive) */
     int8_t               line_height;     /* recommended row spacing */
