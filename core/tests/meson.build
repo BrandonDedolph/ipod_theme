@@ -373,6 +373,8 @@ if target == 'sim'
     'config_test',
     sources: ['kernel/config_test.c',
               '../kernel/config.c',
+              '../ui/settings.c',      # for settings_defaults(): the host tool's
+                                       # record must agree with it field-for-field
               '../fs/fat32.c',
               '../hal/hw/ata.c',
               'hw_mmio/mmio_mock.c'],

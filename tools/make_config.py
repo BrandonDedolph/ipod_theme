@@ -86,7 +86,13 @@ OFF_CRC = SLOT_BYTES - 4          # 1020; the CRC covers bytes [0, OFF_CRC)
 PAYLOAD_FIELDS = [
     ("shuffle",           0),
     ("repeat",            0),     # 0=off 1=all 2=one
-    ("resume_on_startup", 0),
+    # MUST match settings_defaults() in core/ui/settings.c (which has this on).
+    # These are not "the tool's defaults" — the record this writes is the one the
+    # firmware loads forever after, and a valid record always beats
+    # settings_defaults(). A 0 here silently disabled Resume on a device whose
+    # CORECFG.DAT was created by this tool, with every other setting persisting
+    # correctly (diagnosed on hardware 2026-07-27).
+    ("resume_on_startup", 1),
     ("crossfade",         0),
     ("volume",            70),
     ("bass",              0),     # signed

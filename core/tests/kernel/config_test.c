@@ -896,6 +896,30 @@ static void test_host_fixture(const char *path)
           s.volume == 70 && s.backlight_secs == 15 &&
           s.backlight_bright == 32 && s.shuffle == 0 &&
           s.repeat == REPEAT_OFF && s.theme == 0 && s.clicker == 1);
+    /*
+     * The host tool's record must agree with settings_defaults(), field for
+     * field — it is not "the tool's own defaults". config_load() prefers ANY
+     * valid record over settings_defaults(), so whatever this file says is what
+     * the device believes forever after.
+     *
+     * This exact drift shipped: the tool wrote resume_on_startup = 0 while the
+     * firmware defaulted it to 1, so Resume was silently off on a device whose
+     * CORECFG.DAT the tool had created — while every other setting persisted
+     * correctly, which made it look like a resume bug rather than a defaults
+     * bug (diagnosed on hardware 2026-07-27).
+     */
+    settings_t def;
+    settings_defaults(&def);
+    check("host defaults match settings_defaults() for resume_on_startup",
+          s.resume_on_startup == def.resume_on_startup);
+    check("host defaults match settings_defaults() across the board",
+          s.shuffle == def.shuffle && s.repeat == def.repeat &&
+          s.crossfade == def.crossfade && s.volume == def.volume &&
+          s.bass == def.bass && s.treble == def.treble &&
+          s.balance == def.balance &&
+          s.backlight_secs == def.backlight_secs &&
+          s.backlight_bright == def.backlight_bright &&
+          s.theme == def.theme && s.clicker == def.clicker);
     /* The host tool writes the v2 layout too — if it kept emitting v1 the
      * device would still boot, but a freshly imported iPod would silently be
      * unable to remember a position until its first save. */
