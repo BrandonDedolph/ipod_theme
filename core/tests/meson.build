@@ -318,6 +318,22 @@ if target == 'sim'
     test('fat32', fat32_test, args: [fat32_img], suite: 'unit')
   endif
 
+  # m3u: the M3U8 playlist reader. No image and no python needed — the parser
+  # takes a byte-source callback precisely so a malformed playlist is a string
+  # literal in the test rather than a synthetic FAT32 volume, and the corpus
+  # here is mostly malformed on purpose (BOM, CRLF, backslashes, "..", control
+  # bytes, over-long lines, more tracks than the caller's array, a source that
+  # never ends). It links fat32.c as well because the last section drives the
+  # on-disk adapter m3u_parse_file() against a hand-built in-RAM volume.
+  #
+  # The endless-source case would HANG rather than fail if the byte cap
+  # regressed, so this test carries meson's default timeout deliberately.
+  m3u_test = executable('m3u_test',
+    sources: ['fs/m3u_test.c', '../fs/m3u.c', '../fs/fat32.c'],
+    include_directories: include_directories('../fs'),
+    override_options: test_opts)
+  test('m3u', m3u_test, suite: 'unit')
+
   # pcm-ring: the SPSC PCM ring that decouples the streaming disk pump
   # (producer) from the DMA-completion ISR (consumer). Portable logic, no
   # MMIO — verifies free/fill accounting, over-write / under-read clamping,
