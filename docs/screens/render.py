@@ -4,10 +4,16 @@ Faithful 320x240 renderer for the Core (iPod firmware) "Linen" warm-light UI.
 
 Reproduces the on-device look of core/kernel/main.c + core/ui/screen_settings.c:
 the status strip, titled headers, list rows (single + two-line with art chips),
-album detail, now-playing, the volume overlay, the lock/unlock modal, and the
-About dashboard. Text is drawn with the real Nunito faces via PIL, gamma-correct
-(sRGB->linear, blend by glyph coverage, re-encode) so it reads as crisply as the
-device's gamma-aware atlas. Album art is quantized to RGB565 to match the panel.
+album detail, now-playing, the volume overlay, the lock/unlock modal, the About
+dashboard and the Boot Details diagnostics page.
+
+Text is drawn with the real Nunito faces via PIL, gamma-correct (sRGB->linear,
+blend by glyph coverage, re-encode) so it reads as crisply as the device's
+gamma-aware atlas — and, since the firmware's text stack grew a 26.6 pen,
+kerning and per-atlas tracking, it lays glyphs out with the DEVICE's metrics
+rather than PIL's defaults (see the Fonts section). Tracking is read out of
+core/ui/atlas/*.h at runtime, so a screenshot cannot quietly drift from the
+firmware again. Album art is quantized to RGB565 to match the panel.
 
 Outputs PNGs (3x, NEAREST) + a marquee demo GIF into this directory.
 
@@ -15,6 +21,7 @@ Regenerate:  tools/.venv/bin/python3 docs/screens/render.py
 """
 
 import os
+import re
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # CORE_FONTS_DIR overrides it if the faces ever live somewhere else.
 REPO = os.path.dirname(os.path.dirname(HERE))
 FONTS = os.environ.get("CORE_FONTS_DIR", os.path.join(REPO, "tools", "fonts-src"))
+ATLAS = os.path.join(REPO, "core", "ui", "atlas")
 ART = os.path.join(HERE, "art")
 
 if not os.path.isdir(FONTS):
@@ -89,18 +97,142 @@ def _l2s(v):
     return int(cs * 255 + 0.5)
 
 # ---------------------------------------------------------------------------
-# Fonts
+# Fonts — the DEVICE's text metrics, not PIL's defaults
 # ---------------------------------------------------------------------------
-def _font(name, size):
-    return ImageFont.truetype(os.path.join(FONTS, name), size)
+# core/ui/text.c lays a string out in 26.6 fixed point: it carries the
+# fractional advance across glyphs (rounding the pen only when a glyph is
+# blitted), adds the face's kerning pair adjustment, and adds a per-atlas
+# TRACKING between glyphs — suppressed on either side of a space. None of that
+# is what PIL does by default, and a renderer that guesses at it produces
+# screenshots that disagree with the panel by several pixels per string (which
+# is exactly what these did).
+#
+# So mirror the generator: tools/atlas_gen.py derives every advance and every
+# kern pair from THIS Pillow, through getlength() under the Raqm layout engine,
+# then quantizes them. Doing the same arithmetic here means the numbers below
+# are the numbers baked into core/ui/atlas/*.h, not an approximation of them.
+#
+# The basic layout engine is not an option: it applies no kerning at all and
+# returns advances already rounded to whole pixels.
+ADV_ONE     = 64      # 26.6, == ATLAS_ADV_ONE   (core/ui/atlas.h)
+KERN_ONE    = 32      # 1/32 px, == atlas_kern_t.adj scale
+KERN_MIN_PX = 0.25    # == KERN_MIN_PX           (tools/atlas_gen.py)
 
-regular_9  = _font("Nunito-Regular.ttf", 9)
-regular_11 = _font("Nunito-Regular.ttf", 11)
-regular_13 = _font("Nunito-Regular.ttf", 13)
-bold_9     = _font("Nunito-Bold.ttf", 9)
-bold_11    = _font("Nunito-Bold.ttf", 11)
-bold_13    = _font("Nunito-Bold.ttf", 13)
-bold_17    = _font("Nunito-Bold.ttf", 17)
+
+def _atlas_field(header, field):
+    """Read `.field = N,` out of a generated atlas header. Loud on absence: a
+    missing header or a renamed field must not silently degrade to untracked,
+    unkerned text that looks fine in isolation and wrong beside the device."""
+    path = os.path.join(ATLAS, header)
+    try:
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+    except OSError as e:
+        raise SystemExit(
+            f"atlas header not readable: {path} ({e})\n"
+            f"The screenshots take their text metrics from the generated "
+            f"atlases; regenerate them with tools/atlas_gen.sh.")
+    m = re.search(r"\.%s\s*=\s*(-?\d+)" % field, src)
+    if not m:
+        raise SystemExit(f"no '.{field} =' in {path} — atlas format changed?")
+    return int(m.group(1))
+
+
+def _atlas_charset():
+    """Codepoints the atlases actually carry: printable ASCII plus whatever
+    tools/atlas_gen.py appended (read from the generated glyphmap, so it cannot
+    drift from the firmware). Anything outside this renders as a .notdef box on
+    the device, which is a different picture from what PIL would draw."""
+    cps = set(range(0x20, 0x7F))
+    path = os.path.join(ATLAS, "glyphmap.h")
+    try:
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+    except OSError as e:
+        raise SystemExit(f"atlas glyphmap not readable: {path} ({e})")
+    cps.update(int(h, 16) for h in re.findall(r"\{\s*0x([0-9A-Fa-f]{4})\s*,", src))
+    return cps
+
+ATLAS_CHARS = _atlas_charset()
+
+
+class Face:
+    """One (family, size) — the host-side twin of a core/ui/atlas/*.h atlas."""
+
+    def __init__(self, ttf, size, header):
+        self.font = ImageFont.truetype(os.path.join(FONTS, ttf), size,
+                                       layout_engine=ImageFont.Layout.RAQM)
+        self.name = "%s@%d" % (ttf, size)
+        self.tracking = _atlas_field(header, "tracking")     # 26.6
+        self.ascent = _atlas_field(header, "ascent")
+        self.line_height = _atlas_field(header, "line_height")
+        self._adv = {}
+        self._kern = {}
+        self._len = {}
+
+    def _length(self, s):
+        v = self._len.get(s)
+        if v is None:
+            v = self._len[s] = self.font.getlength(s)
+        return v
+
+    def advance(self, ch):
+        """Unkerned pen advance in 26.6 — atlas_gen.py's `advance` field."""
+        a = self._adv.get(ch)
+        if a is None:
+            if ord(ch) not in ATLAS_CHARS:
+                raise SystemExit(
+                    f"{ch!r} (U+{ord(ch):04X}) is not in the atlas: the device "
+                    f"would draw a .notdef box here. Add it to "
+                    f"tools/atlas_gen.py EXTRAS or keep it out of the mock-ups.")
+            a = self._adv[ch] = int(round(self._length(ch) * ADV_ONE))
+        return a
+
+    def kern(self, a, b):
+        """Kern for the ordered pair in 26.6, quantized exactly as the atlas
+        bakes it (1/32 px, pairs under KERN_MIN_PX dropped)."""
+        k = self._kern.get((a, b))
+        if k is None:
+            raw = self._length(a + b) - self._length(a) - self._length(b)
+            adj = 0 if abs(raw) < KERN_MIN_PX else int(round(raw * KERN_ONE))
+            k = self._kern[(a, b)] = adj * 2          # 1/32 -> 26.6
+        return k
+
+    def layout(self, s):
+        """(glyphs, width): glyphs is [(char, x offset in px)] with the pen
+        rounded per glyph, width is the pen rounded once at the end — the two
+        halves of core/ui/text.c's contract (text_draw returns text_width)."""
+        pen = 0
+        prev = None
+        out = []
+        for ch in s:
+            if prev is not None:
+                # A space counts as ONE tracking unit (text.c track_adv):
+                # tracking goes in on the way INTO a space, not on the way out.
+                # Both sides would widen every word gap by twice the tracking;
+                # neither side grows the letter gaps while the word gap stays
+                # put, which is what made words merge. One side moves the word
+                # gap by the same amount as every letter gap, so the ratio the
+                # face was designed with survives. Kerning still applies across
+                # a space if the face has such a pair.
+                if prev != " ":
+                    pen += self.tracking
+                pen += self.kern(prev, ch)
+            out.append((ch, (pen + ADV_ONE // 2) >> 6))
+            pen += self.advance(ch)
+            prev = ch
+        return out, (pen + ADV_ONE // 2) >> 6
+
+    def width(self, s):
+        return self.layout(s)[1] if s else 0
+
+
+regular_9  = Face("Nunito-Regular.ttf",  9, "nunito_regular_9.h")
+regular_11 = Face("Nunito-Regular.ttf", 11, "nunito_regular_11.h")
+regular_13 = Face("Nunito-Regular.ttf", 13, "nunito_regular_13.h")
+bold_11    = Face("Nunito-Bold.ttf",    11, "nunito_bold_11.h")
+bold_13    = Face("Nunito-Bold.ttf",    13, "nunito_bold_13.h")
+bold_17    = Face("Nunito-Bold.ttf",    17, "nunito_bold_17.h")
 
 FONT_SMALL  = regular_9
 FONT_SUB    = regular_11
@@ -114,7 +246,7 @@ RAQUO = "›"
 MIDDOT = "·"
 
 def text_width(s, font):
-    return int(round(font.getlength(s)))
+    return font.width(s)
 
 # ---------------------------------------------------------------------------
 # Surface / primitives
@@ -208,8 +340,17 @@ class Screen:
     def text(self, x, baseline, s, font, ink, clip=None):
         if not s:
             return x
+        # Glyph BY GLYPH at the device's pen positions (kerned, tracked, 26.6
+        # carried) — handing PIL the whole string would lay it out with none of
+        # that. Each glyph goes down at its own rounded pen x, which is what
+        # text.c does before it blits.
+        glyphs, width = font.layout(s)
         mask = Image.new("L", (W, H), 0)
-        ImageDraw.Draw(mask).text((x, baseline), s, font=font, fill=255, anchor="ls")
+        md = ImageDraw.Draw(mask)
+        for ch, dx in glyphs:
+            if ch == " ":
+                continue
+            md.text((x + dx, baseline), ch, font=font.font, fill=255, anchor="ls")
         bbox = mask.getbbox()
         if bbox:
             mp = mask.load()
@@ -233,7 +374,7 @@ class Screen:
                         _l2s(lig * af + LIN[bg] * (1 - af)),
                         _l2s(lib * af + LIN[bb] * (1 - af)),
                     )
-        return x + text_width(s, font)
+        return x + width
 
     def text_centered(self, baseline, s, font, ink):
         self.text((W - text_width(s, font)) // 2, baseline, s, font, ink)
@@ -455,11 +596,14 @@ TRACKS = [
     ("Mourning", "2:52"),
 ]
 DETAIL_SEL = 1
+# The album has 17 tracks (header count + meta line); only the first 5 fit, and
+# the device sizes the scrollbar from the WHOLE tracklist, not the visible slice.
+DETAIL_N = 17
 
 def screen_detail(sel=DETAIL_SEL):
     sc = Screen()
     status_strip(sc, "CORE")
-    header(sc, "Albums", "%d / %d" % (sel + 1, 17), back=True)
+    header(sc, "Albums", "%d / %d" % (sel + 1, DETAIL_N), back=True)
     sc.blit_art(12, 42, 56, "austin")
     tx = 12 + 56 + 12
     sc.text(tx, 42 + 15, "AUSTIN", FONT_HEADER, INK)
@@ -479,7 +623,7 @@ def screen_detail(sel=DETAIL_SEL):
         sc.text_right(W - 16, ry + 15, dur, bold_11, SEL_SUB if sel else MUTED_D)
         sc.text(30, ry + 15, t, FONT_HEADER if sel else FONT_ROW, fg,
                 clip=(30, W - 16 - dw - 8))
-    scrollbar(sc, 108, 0, 5, len(TRACKS))
+    scrollbar(sc, 108, 0, 5, DETAIL_N)
     return sc.img
 
 
@@ -958,32 +1102,183 @@ def screen_songs():
     return sc.img
 
 
+# An ARTIST's "All Songs" — the synthetic row at the top of a filtered album
+# list opens the whole discography in title order (main.c songview_build +
+# songs_render). Two things differ from the plain Songs list above: the header
+# is the ARTIST, and each row's sub-line is the ALBUM. It used to repeat the
+# artist, which under an artist header spent the only sub-line on the one fact
+# the reader already had (main.c songs_row_draw).
+ALLSONGS_ARTIST = "Post Malone"
+ALLSONGS = sorted([
+    ("Chemical", "AUSTIN", "2:46"),
+    ("Circles", "Hollywood's Bleeding", "3:35"),
+    ("Don't Understand", "AUSTIN", "3:14"),
+    ("Hollywood's Bleeding", "Hollywood's Bleeding", "2:36"),
+    ("I Had Some Help", "F-1 Trillion", "3:58"),
+    ("Mourning", "AUSTIN", "2:52"),
+    ("Novacandy", "AUSTIN", "3:38"),
+    ("Pour Me a Drink", "F-1 Trillion", "3:04"),
+    ("Something Real", "AUSTIN", "3:02"),
+    ("Sunflower", "Hollywood's Bleeding", "2:38"),
+], key=lambda s: s[0].lower())
+# the track Now Playing is on, so the screens tell one story
+ALLSONGS_SEL = next(i for i, s in enumerate(ALLSONGS) if s[0] == "Something Real")
+
+def screen_allsongs(sel=ALLSONGS_SEL):
+    sc = Screen()
+    status_strip(sc, "CORE")
+    header(sc, ALLSONGS_ARTIST, "%d / %d" % (sel + 1, len(ALLSONGS)), back=True)
+    top = scroll_window(sel, len(ALLSONGS), LIST_ROWS2)
+    for vr in range(LIST_ROWS2):
+        r = top + vr
+        if r >= len(ALLSONGS):
+            break
+        t, album, dur = ALLSONGS[r]
+        list_row(sc, LIST_Y0, vr, t, sub=album, right=dur, selected=(r == sel),
+                 rh=ROW_H2, title_priority=True)
+    scrollbar(sc, LIST_Y0, top, LIST_ROWS2, len(ALLSONGS))
+    return sc.img
+
+
 # ---------------------------------------------------------------------------
 # Settings sub-screens (no status strip — the header sits at the top band)
 # ---------------------------------------------------------------------------
 def _sel_bar(sc, y0, rowh, r):
     sc.fill_round_rect(6, y0 + r * rowh + 1, W - 16, rowh - 2, 4, SEL_BG)
 
-ROOT_L = ["Playback", "Sound", "Theme", "Display", "Clicker", "About", "Reset Settings"]
+# The root Settings list — core/ui/settings.c ROOT_L, all nine rows. Nine rows
+# do not fit in the eight the panel has room for, so this list SCROLLS and
+# carries a scrollbar (core/ui/screen_settings.c list_render / st_scrollbar).
+ROOT_L = ["Playback", "Sound", "Theme", "Display", "Clicker", "About",
+          "Boot Details", "Disk Mode", "Reset Settings"]
 ROOT_SEL = 1   # Sound
 
-def screen_settings():
+def scroll_window(sel, total, visible):
+    """main.c scroll_window / screen_settings.c st_scroll_window: keep the
+    selection about 1/3 down the window, clamped to the ends."""
+    if total <= visible:
+        return 0
+    return max(0, min(sel - visible // 3, total - visible))
+
+def screen_settings(sel=ROOT_SEL):
     sc = Screen()
     header(sc, "Settings", back=True)
     right_vals = {2: "Linen", 4: "Tick"}   # Theme + Clicker carry their choice
-    for r, label in enumerate(ROOT_L):
-        ry = LIST_Y0 + r * ROW_H
-        sel = (r == ROOT_SEL)
-        if sel:
-            _sel_bar(sc, LIST_Y0, ROW_H, r)
-        fg = SEL_FG if sel else INK
-        rightc = SEL_SUB if sel else MUTED_D
-        chevc = SEL_SUB if sel else CHEVRON
-        sc.text(14, ry + 15, label, FONT_HEADER if sel else FONT_ROW, fg)
+    top = scroll_window(sel, len(ROOT_L), LIST_ROWS)
+    for vr in range(LIST_ROWS):
+        r = top + vr
+        if r >= len(ROOT_L):
+            break
+        ry = LIST_Y0 + vr * ROW_H
+        is_sel = (r == sel)
+        if is_sel:
+            _sel_bar(sc, LIST_Y0, ROW_H, vr)
+        fg = SEL_FG if is_sel else INK
+        rightc = SEL_SUB if is_sel else MUTED_D
+        chevc = SEL_SUB if is_sel else CHEVRON
+        sc.text(14, ry + 15, ROOT_L[r], FONT_HEADER if is_sel else FONT_ROW, fg)
         if r in right_vals:
             sc.text_right(W - 16, ry + 15, right_vals[r], regular_11, rightc)
         else:
             sc.text(W - 18, ry + 15, RAQUO, FONT_ROW, chevc)
+    scrollbar(sc, LIST_Y0, top, LIST_ROWS, len(ROOT_L))
+    return sc.img
+
+
+# ---------------------------------------------------------------------------
+# Boot Details (Settings > Boot Details) — core/ui/screen_settings.c
+# settings_diag_render(). Where a cold boot's 3.3s actually goes.
+# ---------------------------------------------------------------------------
+# Phase colours are fixed literals on the device too, not palette slots: the
+# segments have to stay distinguishable from each other in any theme.
+C_LCD, C_DISK, C_LIB, C_RES, C_OTHER = 0x3BDB, 0x3DAD, 0xE546, 0xE125, 0x94B2
+
+def fmt_ms(ms):
+    """settings_diag_render's fmt_ms: sub-second in ms (a 40ms seek must not
+    round to '0.0s'), a second or more with one decimal."""
+    if ms is None:
+        return "--"
+    if ms < 1000:
+        return "%dms" % ms
+    return "%d.%ds" % (ms // 1000, (ms // 100) % 10)
+
+# Measured on the device: a cold boot is ~3.3s, and it is the library scan that
+# owns it. OTHER is NOT an input — the firmware derives it as the unattributed
+# remainder (total minus the four measured phases), so it is whatever the other
+# phases leave behind; setting it here would let the picture disagree with the
+# figures, which is the one thing this screen must never do.
+DIAG_TOTAL = 3300
+DIAG_LCD, DIAG_DISK, DIAG_LIB, DIAG_RESUME = 0, 300, 1800, 900
+DIAG_RES_DIR, DIAG_RES_OPEN, DIAG_RES_SEEK = 0, 700, 40
+DIAG_DECODE_PCT = 61          # of the 22676 us/kframe 44.1kHz real-time budget
+DIAG_SEQ = 7
+DIAG_LBA = (49236472, 49236474)
+
+def screen_diag():
+    sc = Screen()
+    header(sc, "Boot Details", back=True)
+
+    # headline: label left, total right, on one line
+    sc.text(16, 60, "COLD BOOT", FONT_SMALL, MUTED)
+    sc.text_right(W - 16, 63, fmt_ms(DIAG_TOTAL), FONT_TITLE, INK)
+
+    # stacked proportional bar — same numbers as the legend, so the picture
+    # cannot disagree with the figures; the remainder is drawn last, in grey.
+    bx, by, bw, bh = 16, 74, W - 32, 10
+    sc.fill_round_rect(bx, by, bw, bh, 5, TRK)
+    segs = [(DIAG_LCD, C_LCD), (DIAG_DISK, C_DISK), (DIAG_LIB, C_LIB),
+            (DIAG_RESUME, C_RES)]
+    x = bx
+    for ms, col in segs:
+        w = ms * bw // DIAG_TOTAL
+        if w <= 0:
+            continue
+        w = min(w, bx + bw - x)
+        sc.fill_rect(x, by, w, bh, rgb565(col))
+        x += w
+    if x < bx + bw:
+        sc.fill_rect(x, by, bx + bw - x, bh, rgb565(C_OTHER))
+
+    # legend: six entries in two columns of three (six stacked rows ran into
+    # the config block at the bottom of a 240px panel)
+    known = DIAG_LCD + DIAG_DISK + DIAG_LIB + DIAG_RESUME
+    other = max(0, DIAG_TOTAL - known)
+    names = ["LCD", "DISK", "LIBRARY", "RESUME", "OTHER", "DECODE"]
+    cols = [C_LCD, C_DISK, C_LIB, C_RES, C_OTHER, None]
+    vals = [DIAG_LCD, DIAG_DISK, DIAG_LIB, DIAG_RESUME, other]
+    colx, colw = (16, 168), 136
+    for i in range(6):
+        cx = colx[i // 3]
+        y = 104 + (i % 3) * 18
+        sc.fill_rect(cx, y - 7, 6, 6, rgb565(cols[i]) if cols[i] else MUTED2)
+        sc.text(cx + 11, y, names[i], FONT_SMALL, MUTED)
+        if i < 5:
+            sc.text_right(cx + colw, y, fmt_ms(vals[i]), FONT_SUB, INK)
+        else:
+            # decode headroom against the real-time budget; red inside 20% of it
+            sc.text_right(cx + colw, y, "%d%%" % DIAG_DECODE_PCT, FONT_SUB,
+                          BATT_RED if DIAG_DECODE_PCT >= 80 else INK)
+    sc.fill_rect(16, 152, W - 32, 1, BORDER)
+
+    # the resume split, as one indented dimmer line: it is a breakdown OF the
+    # RESUME entry above, not three more phases
+    x = 16
+    sc.text(x, 168, "RESUME", FONT_SMALL, MUTED2)
+    x += text_width("RESUME", FONT_SMALL) + 10
+    for lbl, ms in (("dir", DIAG_RES_DIR), ("open", DIAG_RES_OPEN),
+                    ("seek", DIAG_RES_SEEK)):
+        sc.text(x, 168, lbl, FONT_SMALL, MUTED2)
+        x += text_width(lbl, FONT_SMALL) + 4
+        v = fmt_ms(ms)
+        sc.text(x, 168, v, FONT_SMALL, INK)
+        x += text_width(v, FONT_SMALL) + 12
+    sc.fill_rect(16, 196, W - 32, 1, BORDER)
+
+    # settings-file locator: the two absolute LBAs config_save() writes to —
+    # with no serial cable, the panel is the only place to read them back
+    sc.text(16, 214, "CONFIG", FONT_SMALL, MUTED)
+    sc.text_right(W - 16, 214, "seq %d" % DIAG_SEQ, FONT_SUB, INK)
+    sc.text_right(W - 16, 230, "%d / %d" % DIAG_LBA, FONT_SMALL, MUTED_D)
     return sc.img
 
 
@@ -1188,8 +1483,10 @@ def main():
     outputs.append(save_png(screen_music(), "music.png"))
     outputs.append(save_png(screen_artists(), "artists.png"))
     outputs.append(save_png(screen_songs(), "songs.png"))
+    outputs.append(save_png(screen_allsongs(), "allsongs.png"))
     # --- new: settings ---
     outputs.append(save_png(screen_settings(), "settings.png"))
+    outputs.append(save_png(screen_diag(), "bootdetails.png"))
     outputs.append(save_png(screen_sound(), "sound.png"))
     outputs.append(save_png(screen_clicker(), "clicker.png"))
     outputs.append(save_png(screen_theme(), "theme.png"))

@@ -6,13 +6,16 @@ index that get built into or copied alongside the firmware.
 
 | Tool | What it does |
 |---|---|
-| `atlas_gen.py` / `atlas_gen.sh` | Pre-rasterize the Nunito TTFs (regular + bold, 9/11/13/17 px) into the `core/ui/atlas/*.h` glyph atlases, and emit `glyphmap.h` (the codepoint → glyph-index table for the non-ASCII glyphs: Latin-1 supplement + smart punctuation + the UI chevrons/middot). Run when the font set or glyph coverage changes; outputs are committed. |
+| `atlas_gen.py` / `atlas_gen.sh` | Pre-rasterize the Nunito TTFs (regular 9/11/13 px, bold 9/11/13/17 px — seven atlases) into the `core/ui/atlas/*.h` glyph atlases, and emit `glyphmap.h` (the codepoint → glyph-index table for the non-ASCII glyphs: Latin-1 supplement + smart punctuation + the UI chevrons/middot). Each atlas carries three spacing artefacts as well as bitmaps: **26.6 fractional advances** (1/64 px, so the device pen carries the fraction instead of rounding per glyph), a **kerning table** (per ordered pair, int8 in 1/32 px, emitted only above a 0.25 px threshold, sorted for binary search), and a single **tracking** value per `(face, size)`. Run when the font set or glyph coverage changes; outputs are committed. |
+| `text_preview.c` | Render the **real** device text stack to a PPM on the host, so glyph spacing can be judged without flashing. It links `core/ui/text.c` and the generated atlases *unmodified* — same gamma-correct blend, same 26.6 pen, same kerning and tracking — so what it draws is what the panel draws. A preview that re-implemented any of that would agree with the device only by luck. |
+| `text_metrics.py` | Measure letter spacing **objectively** from the baked atlases, using the device's own pen arithmetic. For every ordered pair it reads the actual ink out of the alpha bitmaps (not the bboxes — ~37% of nonzero pixels here are sub-25%-alpha fringe) and reports the visual gap distribution per atlas. `--target X` inverts it: it *solves* the per-atlas tracking that puts the mean gap at X px. |
+| `make_config.py` | Create (`--create`) the pre-allocated `CORECFG.DAT` settings file in the volume root, and verify (`--verify`, read-only) the absolute LBA the firmware will overwrite. The firmware cannot create files, so this must run once before settings can persist — and `--verify` is the mandatory pre-flight before the device's first write. The record is now **v2**: v1 was settings only, v2 appends the resume locator (`resume_hash` / `resume_secs` / `resume_total`), gated on the record's own `length` exactly as `config_decode()` gates it, so a v1 record still verifies. Its defaults must match `settings_defaults()` in the firmware. See `core/docs/design/settings-persistence.md`. |
 | `build_index.py` | Read a source music tree with `ffprobe` and emit `CORELIB.IDX` — the single-read library index the firmware loads at boot (duration, track/disc, UTF-8 title/artist/album/genre, and a normalized-name hash locator per track). Paths are `--src` / `--out`; ffprobe failures are counted and listed at the end (a non-zero exit), and the record count is checked against the firmware's `LIB_MAX_SONGS`. |
 | `artist_genres.json` | The artist → primary genre map `build_index.py` applies when a file's own genre tag is empty or a comma-list. Data, not code — add artists here, not in the script. |
-| `make_config.py` | Create (`--create`) the pre-allocated `CORECFG.DAT` settings file in the volume root, and verify (`--verify`, read-only) the absolute LBA the firmware will overwrite. The firmware cannot create files, so this must run once before settings can persist — and `--verify` is the mandatory pre-flight before the device's first write. See `core/docs/design/settings-persistence.md`. |
 | `coreart.py` | Extract a FLAC's embedded cover into the CoreArt RGB565 sidecars the firmware blits directly — `folder.art` (120×120, now-playing hero) and `folder.thm` (28×28, list chip). No JPEG decoding on the device. |
 | `install_deps.sh` | One-shot install of the build prerequisites (toolchain + SDL2 + Go). |
 | `fonts-src/` | Nunito TTF sources (SIL Open Font License 1.1) the atlas generator reads. |
+| `fonts-out/` | **Dead.** 30 `.fnt` bitmap fonts from the abandoned Rockbox-theme era. Nothing in `core/` or the build references them, and the device does not read `.fnt` at all — it links the generated C headers in `core/ui/atlas/`. Kept only because nobody has deleted it; it is a candidate for removal, not a build input. |
 
 ## Regenerating assets
 
@@ -41,6 +44,36 @@ additionally needs **Python 3.12+** (it uses a backslash inside an f-string
 expression, legal only since PEP 701) and checks that explicitly rather than
 failing as a bare `SyntaxError`.
 
+**Pillow must have the RAQM layout engine.** `atlas_gen.py` measures both
+advances and kerning through `font.getlength()` with
+`ImageFont.Layout.RAQM`, because Raqm applies the font's own GPOS kerning and
+the basic layout engine does not — silently. A Pillow built without libraqm
+does not error here; it bakes an **empty kern table** and the atlases look
+subtly, uniformly wrong. Check with
+`python3 -c "from PIL import features; print(features.check('raqm'))"`.
+
+## Judging and tuning text spacing
+
+Spacing is tuned on the host against measurements, not by eye on the device.
+
+```bash
+# Render the real device text stack to a PPM (links core/ui/text.c unmodified)
+cc -I core/ui -o /tmp/text_preview tools/text_preview.c core/ui/text.c
+/tmp/text_preview /tmp/out.ppm 3          # 3 = nearest-neighbour zoom factor
+
+# Measure the shipped atlases: per-atlas gap distribution + worst pairs
+tools/.venv/bin/python3 tools/text_metrics.py --worst 10 [--atlas NAME]
+
+# Solve the tracking that equalises the mean visual gap across atlases
+tools/.venv/bin/python3 tools/text_metrics.py --target 1.45
+```
+
+The solved numbers live in `TRACKING_PX` in `atlas_gen.py`, keyed by
+`(is_bold, px)` — not by size alone, because bold is fitted tighter than
+regular at the same size. To sweep a candidate value without editing the
+table, set `CORE_TRACKING_PX=<px>`; it overrides every atlas for that run.
+Re-run `atlas_gen.sh` after changing either.
+
 ### The library locator hash
 
 `build_index.py`'s `name_hash()` is duplicated in `core/kernel/main.c`, and the
@@ -53,6 +86,17 @@ table (`core/tests/kernel/name_hash_vectors.h`) by the `name-hash` and
 ```bash
 python3 core/tests/scripts/check_name_hash_parity.py
 ```
+
+`make verify-hw` runs this script, so a divergence fails the build rather
+than silently losing tracks. (Its sibling `check_resume_parity.py` guards the
+same *shape* of hazard entirely inside `core/` — the verbatim copy of
+`resume_find_song()` that the host test compiles — and is not about a host
+tool.)
+
+`make_config.py` carries a third instance of the hazard with no script behind
+it: its default record must agree with `settings_defaults()` in
+`core/ui/settings.c`, and once it did not — the host file shipped Resume off
+while the firmware defaulted it on.
 
 Known gap: the C side has no 4-byte UTF-8 branch in its re-encoder, so the two
 disagree for astral codepoints (emoji). Tracks with one in the name never

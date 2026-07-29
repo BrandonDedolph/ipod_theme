@@ -10,6 +10,172 @@ naming convention so far: short, tactile nouns (Cabinet, Linen).
 
 ---
 
+# Where the plan stands — 2026-07-28
+
+Phases 0–4 are substantially done and the firmware boots itself on real
+hardware. This section is the ledger; everything below the "original plan"
+divider is the April document, kept verbatim as the record of what we
+*intended* — several of its decisions were reversed for good reasons, and
+the reasons are more useful than a tidy rewrite.
+
+## Phase ledger
+
+| Phase | Planned | Where it landed |
+|---|---|---|
+| **0** — hardware reference | 3–4 wks | **DONE.** `core/docs/hw/` (9 subsystem docs + README), cited, and gated in CI by `check_hw_consistency.py` against `hal/hw/pp5022.h`. Two facts have since been corrected *from the device* (the image checksum has no `MODEL_NUM` seed; an image body is at `devOffset + 0x800`). |
+| **1** — bootable skeleton | 3 wks | **DONE for hardware, ABANDONED for the sim.** `crt0.S`, linker script, kernel skeleton, `hal.h` all shipped; first hardware boot 2026-07-17. There is no `core-sim` executable — see "decisions we reversed". |
+| **2** — drivers | 6–8 wks | **DONE except USB.** LCD (+`bcm_init`), click-wheel, clock/boost/idle, ATA, FAT32, I²S/DMA/WM8758B, charge + battery all run on silicon. **USB MSC was never started** — recovery goes through the ROM's disk mode instead, which turned out to be enough. |
+| **3** — filesystem + audio engine | 4 wks | **DONE for FLAC.** Streaming decode off the disk, tag reading, a host-built index in place of a device-side tagcache. MP3 builds but is disabled; the other codecs are untouched. No ReplayGain, no crossfade, no pitch. |
+| **4** — UI integration + installer | 3 wks | **UI DONE; installer NOT.** The whole shell, browser, Now Playing, overlays and Settings are written from scratch in C. The Go CLI can pack/unpack a `.ipod` image and nothing else — `install` / `flash` / `recover` are stubs, and flashing is `ipodpatcher` by hand. |
+| **5** — polish & power | ongoing | **In progress.** CPU idle scaling, HDD spin-down, codec power-down + clock gating, suspend-to-RAM, album-art cache, panic screen with a readable on-screen report. Panel sleep at idle is written but switched off. No crash log to disk, no battery-curve calibration. |
+
+## Decisions we reversed, and why
+
+These are the parts of the original document that are now simply wrong.
+Each was a deliberate change, not drift.
+
+- **Bootloader: neither option 1 nor option 2. We boot directly.** The plan
+  was to keep the Rockbox/ipodloader2 bootloader and ship a chainloaded
+  `core.ipod`. As of 2026-07-28 `core` *is* the OSOS image in the firmware
+  partition; the boot ROM hands straight to `crt0.S`, which does the MMAP0
+  remap itself. No chainloader, no boot menu, and Apple's firmware is no
+  longer on the device. The plan's premise that "do not replace the factory
+  bootloader" is the low-risk path held right up until it didn't: the
+  chainloader was adding a boot menu, seconds of boot time, and a set of
+  inherited-state assumptions (BCM idle at frame one, backlight already
+  lit) that were silently propping the firmware up. The recovery argument
+  that made the plan cautious turned out to be answered by the ROM: **Select
+  + Play disk mode runs before any image loads**, proven on this device with
+  our firmware as the sole OSOS and a black screen.
+- **FAT32: written from scratch, not FatFs.** Vendoring FatFs would have
+  pulled a whole write path we did not want on a user's music disk. Ours is
+  read-only by construction, every chain walk bounded, every cluster
+  validated, and it is fuzz-adjacent tested under ASan/UBSan against corrupt
+  images.
+- **Codecs: `dr_flac` + `dr_mp3`, not Helix.** No Helix MP3/AAC, no ALAC, no
+  Tremor, no libopus. The device is FLAC-only in practice — `dr_mp3`'s float
+  synthesis filter cannot hit real time on an FPU-less ARM7, which is the
+  concrete form of the plan's own "no floating point in core code" rule
+  coming back around. The plan's claim that codecs run on the COP is also
+  unrealised: everything decodes on the CPU.
+- **Tagcache: a host-built index, not a device-side database.** `CORELIB.IDX`
+  is built by `tools/build_index.py` and loaded in one read. No on-device
+  scan, no delta rebuild, no atomic-rename machinery — and no write path, so
+  the plan's "data durability / atomic tagcache writes" requirement is moot
+  rather than met.
+- **The simulator does not exist.** `hal/sim/sim_hal.c` builds into a static
+  library that no executable links. `make sim` builds the *host test suite*.
+  Everything the plan hung off the sim — golden-frame visual regression,
+  scripted navigation, boot-timing gates, soak tests, `core test` — is
+  therefore not real. What replaced it is the MMIO golden-trace suite: each
+  freestanding driver host-compiled against a recording mock bus and
+  asserted to emit its exact ordered register grammar. That is a narrower
+  net but it is the only automated check of hardware code, and it has caught
+  real bugs.
+- **The Go CLI is one command, not eleven.** `core firmware pack/unpack`
+  works. `install`, `update`, `recover`, `info`, `flash`, `debug`, `sim`,
+  `test`, `build`, `release` are stubs or absent, there is no embedded sim,
+  no signing, no release pipeline, and no ipodpatcher replacement.
+- **Cabinet was not ported; it was rewritten.** The plan assumed porting a
+  Rockbox plugin's UI logic by swapping `rb->` calls. The shipped UI is
+  first-party C written against `core/ui/` primitives, driven by the
+  `design_reference/*.jsx` mockups. This is also why the licence posture is
+  cleaner than the plan assumed it would need to be.
+- **Screenshots are host reproductions, not sim captures.** The plan's
+  golden-frame pipeline never existed, so `docs/screens/render.py` is a
+  standalone Python/PIL reimplementation of the UI — real Nunito faces, real
+  palette, real layout, but not one pixel from firmware code. It can drift
+  silently. There is no on-device capture path.
+
+## Open decisions — where they landed
+
+The six questions the original document left open all have answers now.
+
+1. **Bootloader** — neither. Direct boot; our image is the OSOS.
+2. **Build system** — Meson, with a thin `Makefile` as the human entry point
+   (`make hw` / `make ipod` / `make sim` / `make verify-hw`).
+3. **Rust** — no. Pure C11 + ARM assembly throughout.
+4. **Settings storage** — a binary record, not a text file: two alternating
+   physical-sector slots in a pre-allocated `CORECFG.DAT`, CRC-32 over the
+   whole record including the header, sequence number decides the winner.
+   Text lost because there is no general FAT writer to rewrite a file with,
+   and a fixed-size record can be overwritten in place without touching a
+   single byte of filesystem metadata.
+5. **Project name** — still `core`. Nothing better proposed.
+6. **Curated settings list** — nine rows: Playback, Sound, Theme, Display,
+   Clicker, About, Boot Details, Disk Mode, Reset. Every placeholder that
+   did nothing (Crossfade, ReplayGain, Skip Length, Stereo Width, Shortcuts,
+   Language) was removed rather than shipped inert.
+
+## Performance budget — measured against the targets
+
+The April table was written before anything ran. Here is what the hardware
+actually does. Unmeasured rows are marked as such rather than guessed.
+
+| Metric | Target | Actual | |
+|---|---|---|---|
+| Cold boot → interactive | < 2.0 s | **8.4 s measured**, 5.1 s of it one FLAC seek (since fixed); post-fix total not yet read off the device | Instrumented rather than estimated — Settings → Boot Details shows the per-phase split live |
+| Resume from sleep | < 200 ms | not measured | — |
+| Selector frame time | ≤ 16.6 ms | not measured; damage-tracked partial presents shipped | — |
+| Album-art decode (cached row) | 0 ms | 0 ms — chips are pre-converted RGB565, cache hit is a copy | Met |
+| Album-art decode (cold) | < 80 ms | not measured; the 28 px chip is an exact-size file, a 1:1 copy with no resample | — |
+| Library load | < 300 ms / 10k | **~1.8 s** for the current library, one read of `CORELIB.IDX` | Missed |
+| Binary size | < 300 KB (no codecs) | **298 KB text total, codecs included** | Roughly on target, though not measured the way the row defines it |
+| Static RAM (excl. audio buffer) | ≤ 2 MB | **~2.45 MB** (11.45 MB bss − 8 MB disk buffer − 1 MB PCM ring) | Slightly over |
+| Audio buffer | 50 MB | **8 MB** anti-skip disk buffer + 1 MB PCM ring | Deliberately smaller; the whole image lives in a 32 MB SDRAM window |
+| Idle CPU clock | 24 MHz | **30 MHz + halt** | Changed |
+| HDD spin-up frequency | ≤ 1 / 5 min | 20 s idle spin-down; the 8 MB buffer is ~73 s of FLAC ahead | Not measured over a session |
+| Screen-on idle power | < 30 mW | not measured — no instrumentation | — |
+
+The quality-bar section below has held up better than the budget, with two
+exceptions worth naming: **ReplayGain is not implemented**, and **gapless is
+implemented but has not been confirmed by ear on the device**. "Crash
+transparency" is half done — there is a panic screen, but nothing writes a
+crash log to disk (nothing can; see cluster allocation, below).
+
+## What's next
+
+In the order they're worth doing.
+
+1. **Wire the M3U8 reader into a Playlists UI (read only).** The parser is
+   merged, unit-tested and bounded, and is currently wired to *nothing* —
+   `--gc-sections` strips it out of the shipped image. Resolving a parsed
+   path to a cluster is a segment walk; no new filesystem capability is
+   needed. This is the cheapest real feature left.
+2. **A screen-tuned font face.** Advances (26.6), kerning (1,700–3,700 pairs
+   per face) and per-face tracking are all fixed and *measured* — and the
+   type still reads wrong at 9–13 px. Nunito ships no TrueType hinting
+   bytecode. The remaining lever is the face, not more spacing tuning.
+   `tools/text_preview.c` renders the real stack on the host, so a candidate
+   can be judged without a flash.
+3. **Re-enable panel sleep at idle.** Disabled because it left the screen
+   solid white until a reboot; two of the three stated preconditions
+   (`bcm_init()` exists, the post-wake relight is deferred) have since been
+   met.
+4. **Search.** Not implemented, and the index is already in RAM.
+5. **Playlist writing — i.e. FAT32 cluster allocation.** The only write we
+   have is an in-place overwrite of one pre-allocated file's first cluster,
+   which touches zero filesystem metadata *by design*. Saving a playlist
+   means allocating and chaining clusters, updating the FAT and FSInfo, and
+   growing a directory entry, on a disk full of someone's music. This also
+   unblocks crash logs to disk. It is a project, not a chunk — do not let it
+   ride along with item 1.
+
+Verification debt worth clearing while nearby: the 500 mA charge-current
+change needs an inline USB current meter, and gapless needs a listen.
+
+---
+
+---
+
+# The original plan, April 2026 — kept for the record
+
+*Everything below this line is the document as first written, before any
+code existed. Read it as intent, not as a description of the system. The
+ledger above says where each part actually went.*
+
+---
+
 ## Goals
 
 **Lean and fast is the whole point.** Every architectural decision below

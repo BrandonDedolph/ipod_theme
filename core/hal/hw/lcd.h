@@ -14,9 +14,14 @@
 
 #include <stdint.h>
 
-/* Host-side LCD port init (GPO32/GPIOC setup; no BCM bootstrap — the
- * chainload handoff guarantees the BCM is already powered, awake and
- * idle, see core/docs/hw/02-lcd.md "Chainload handoff state").
+/* Host-side LCD port init (GPO32/GPIOC setup).
+ *
+ * This USED to rely on the chainloader having left the BCM powered, awake
+ * and idle — ipodloader2 drew its own menu, so it necessarily had. We now
+ * boot DIRECTLY from the firmware partition and nobody has touched the BCM
+ * before us, so that guarantee is gone; bcm_init() exists to bring it up
+ * cold. See core/docs/hw/02-lcd.md.
+ *
  * Returns nonzero if the BCM power-rail probe (GPO32_VAL bit 0x4000)
  * reads powered, 0 if not. Call once before lcd_fill(). */
 int lcd_init(void);

@@ -10,9 +10,38 @@ addresses, bit fields, init sequences), never their source code. This
 keeps the reference and the firmware built on it cleanroom and
 Apache-2.0.
 
-> **Status:** Phase 0 deliverable. This document stands on its own —
-> even if no firmware is ever built on top of it, the iPod 5G modding
-> community now has the cleanest single reference covering this device.
+> **Status:** originally a Phase 0 deliverable; now a live reference that
+> the firmware in `core/` has been built and booted against on real
+> hardware. It still stands on its own — even if no firmware were ever
+> built on top of it, the iPod 5G modding community would have the cleanest
+> single reference covering this device — but the register grammars here
+> are no longer only *documented*, they are asserted: `check_hw_consistency.py`
+> cross-checks `hal/hw/pp5022.h` against these files on every
+> `make verify-hw`, and the MMIO golden-trace tests assert each driver's
+> exact register sequence.
+
+## How we actually boot (read this first)
+
+Our firmware **is** the OSOS image in the iPod's firmware partition. There
+is no chainloader, no ipodloader2, and no boot menu on the device: the Apple
+boot ROM loads our image and enters `core/boot/crt0.S` directly. Two
+consequences run through several of the docs below:
+
+- **We inherit the boot ROM's state, not a loader's.** SDRAM is still at its
+  native `0x10000000` and has *not* been remapped to `0x0` — crt0.S performs
+  the MMAP0 remap itself, from an IRAM stub, and everything up to that point
+  is position-independent. (01-soc-pp5022.md, 08-boot-dock.md.)
+- **Nothing has warmed the display for us.** Passages in 02-lcd.md describing
+  the "chainload handoff" (BCM already powered, bootstrapped, idle at frame
+  one) document what ipodloader2 *used to* leave behind. The driver no longer
+  relies on any of it: it probes, and `bcm_init()` power-cycles a wedged BCM.
+
+Install is `ipodpatcher <n> -wf core.ipod`, verified by reading the partition
+back. Recovery is the boot ROM's own disk mode — **hold Select + Play at
+power-on** — which runs before any firmware image is loaded and therefore
+works no matter how broken the image we wrote is. That unconditional escape
+hatch is the load-bearing safety net for everything here: never write the
+boot ROM, never disturb the partition signature. (08-boot-dock.md.)
 
 ## Table of contents
 
@@ -39,7 +68,8 @@ Apache-2.0.
   code lives in `firmware/target/arm/pp/` and applies to PP5020/5022/5024
   uniformly.
 - 5G and 5.5G differ in panel gamma, max storage size, and a few
-  GPIO assignments. They share one Rockbox build with runtime branches.
+  GPIO assignments — small enough that Rockbox covers both from one build
+  with runtime branches, and small enough that we do too.
 
 ## Source map
 
@@ -70,7 +100,9 @@ utils/ipodpatcher/ipodpatcher.c         Firmware-partition installer
   PAL/NTSC composite, but we won't use it. Documented at a surface
   level in 02-lcd.md only.
 - **Apple firmware ("OF") internals** — covered only where the boot
-  ROM's expectations affect us (image format, partition signature).
+  ROM's expectations affect us (image format, partition signature). We
+  *replace* the Apple OS rather than dual-booting it, so its runtime
+  behaviour is not something we need to model.
 
 ## Caveats
 

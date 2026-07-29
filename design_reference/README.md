@@ -1,13 +1,19 @@
-# Rockbox Theme — iPod Classic Video (5G)
+# Design reference — iPod Classic Video (5G/5.5G)
 
-A clean, original Rockbox theme designed at the iPod's native **320×240** resolution. Rounded geometric type (Nunito), warm-light + true-dark palettes, and a complete set of menu, system, and Now Playing screens.
+A clean, original UI designed at the iPod's native **320×240** resolution. Rounded geometric type (Nunito), warm-light + true-dark palettes, and a complete set of menu, system, and Now Playing screens.
 
-This package is a design reference — the canonical layouts, tokens, and behaviors the UI is built from.
+This package is a design reference — the canonical layouts, tokens, and behaviors the firmware UI is built from.
 
-> **Note:** this JSX prototype predates the project's pivot. `core/` is now
-> **from-scratch firmware that replaces Rockbox** (not a Rockbox theme); this
-> folder is kept as the visual source of truth — palette, chrome, screen
-> layouts, and interaction behavior — that the firmware UI implements.
+> **This JSX prototype predates the project's pivot, and its name is a
+> fossil.** It began as a Rockbox *theme*; `core/` is now **from-scratch
+> firmware that replaces Rockbox entirely** — no Rockbox code, no `.wps`, no
+> theme engine. What survives is the design: the palette, chrome, screen
+> layouts, and interaction model that `core/kernel/main.c` and `core/ui/`
+> implement directly in C.
+>
+> Read this folder as **intent**, not inventory. Several screens here have no
+> firmware counterpart yet; see "What the firmware actually implements" below
+> before assuming a screen exists.
 
 ---
 
@@ -121,48 +127,60 @@ Lists scroll automatically so the selection stays visible (~1/3 from the top of 
 
 ---
 
-## Translating to Rockbox `.wps` / `.sbs`
+## What the firmware actually implements
 
-Rockbox themes are configured via tag files. Key tags this design uses:
+The prototype draws the whole product; the firmware is partway through it.
+As of this writing, on device:
 
-| Concept in this design | Rockbox tag(s) |
-|---|---|
-| Track title / artist / album | `%it`, `%ia`, `%id` |
-| Track number / total | `%pl` / `%pe` |
-| Elapsed / remaining / total | `%pc` / `%pr` / `%pt` |
-| Progress bar | `%pb` |
-| Volume | `%pv` |
-| Battery percent | `%bl` |
-| Charging | `%bc` |
-| Time of day | `%cc:%cM` (12-hour) |
-| Album art viewer | `%Cd` (display), `%Cl` (load) |
-| Shuffle / repeat | `%mp` (playmode) |
-| Hold | `%mh` |
-| Codec / bitrate | `%fc`, `%fb` |
-| Conditional formatting | `%?xx<true|false>` |
+**Built and working** — main menu, Music sub-menu, Artists / Albums / Songs /
+Genres / Shuffle Songs, the folder browser, album detail with an art header,
+album-art chips in lists, Now Playing (120×120 cover, scrolling marquee,
+progress), the play queue, Settings (with a scrolling list + scrollbar),
+About / Boot Details, the volume and lock/unlock modals, the charging screen,
+and the boot splash.
 
-The 4 themes are intended to be 4 separate `.wps` files sharing one `.sbs` (status bar) and one menu skin. Settings live in `.cfg`.
+**In the design but not the firmware** — Playlists, Podcasts, Audiobooks and
+Composers exist as *greyed-out* menu entries (`active = 0` in
+`core/kernel/main.c`) and lead nowhere. An M3U8 parser exists in
+`core/fs/m3u.c` but is wired to nothing, and playlist *writing* is impossible
+today because the FAT driver is read-only. There is no EQ: the Sound settings
+expose bass / treble / balance / crossfade as **cosmetic** controls with no
+DSP behind them. The WPS info pages (big art / peak meter / track info) are
+not built.
 
-### Suggested font
+**Themes: two, not four.** Settings → Theme offers **Linen** and **Onyx** —
+Onyx being this design's Ink dark palette, renamed. They are a live palette
+swap, not separate screens: `core/ui/palette.c` holds `PAL_LINEN` and
+`PAL_ONYX` as parallel token blocks and `theme_set()` swaps the whole block
+at once. Paper and Card were not implemented; the four-Now-Playing-themes
+idea was dropped in favour of one layout that reads correctly in both a light
+and a dark palette.
 
-Nunito isn't bundled with Rockbox by default. Either:
-- Convert Nunito to `.fnt` via `convbdf` (Rockbox's font tooling), or
-- Use Rockbox's built-in `26-NimbusSans` as the closest rounded fallback.
-
-A 16-pixel and 12-pixel weight would cover this design's full type scale.
+**Type is baked, not loaded.** Nunito is pre-rasterized on the host into
+static C glyph atlases (`core/ui/atlas/*.h`) at regular 9/11/13 px and bold
+9/11/13/17 px — there is no font file and no font engine on the device. The
+renderer is a gamma-correct AA blitter carrying a 26.6 fractional pen,
+per-pair kerning, and per-atlas tracking. The `.fnt` bitmap fonts under
+`tools/fonts-out/`, and the `convbdf` conversion advice this README used to
+carry, are a **dead leftover of the Rockbox-theme era** — nothing reads them.
+See [`../tools/README.md`](../tools/README.md). `JetBrains Mono` is not
+shipped either; everything on the device is Nunito.
 
 ---
 
 ## What to keep, what to invent
 
-This design is a reference, not a one-to-one Rockbox port. Some flourishes here (animated peak meter, smooth progress, volume overlay placement) may need to be approximated using Rockbox's actual conditional-tag system. Stay faithful to:
+This design is a reference, not a spec to trace pixel for pixel. Some
+flourishes here (animated peak meter, smooth progress) buy little on a 30 MHz
+ARM7 driving a framebuffer through a video coprocessor, and get approximated
+or dropped. Stay faithful to:
 
 - Type hierarchy and weights
 - Color palette
 - Spacing rhythm of status / header / list
 - Lock + battery sitting together in the status row
 
-…and approximate the rest within Rockbox's WPS expressiveness.
+…and let the rest bend to what the hardware renders well.
 
 ---
 

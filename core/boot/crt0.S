@@ -1,7 +1,8 @@
 /*
  * core/boot/crt0.S — ARM7TDMI startup for the iPod Video.
  *
- * The Rockbox-compatible bootloader hands off to our OSOS image with
+ * The Apple boot ROM enters our OSOS image directly (we ARE the OSOS —
+ * there is no chainloader any more; see core/docs/hw/08-boot-dock.md) with
  * (core/docs/hw/08-boot-dock.md, "Boot ROM → our code: handoff state"):
  *   - SDRAM at its NATIVE address (0x10000000) — NOT yet remapped to
  *     0x00000000. We are loaded into and entered in that native window,

@@ -12,12 +12,64 @@ Output format is always 16-bit signed interleaved PCM. Codecs that
 decode at higher bit depth (e.g. 24-bit FLAC) downconvert in their
 wrapper.
 
+## Freestanding
+
+Both shipped decoders build freestanding for the device
+(`-DCORE_FREESTANDING`): **no libc, no malloc, no libm**.
+`DR_FLAC_NO_STDIO` / `DR_MP3_NO_STDIO` remove the file paths;
+allocation always goes through explicitly-passed callbacks backed by a
+static arena, so dr_flac's default `MALLOC`/`REALLOC`/`FREE` are defined to
+NULL/no-op and are never reached; assertions compile out; memory ops route to
+`lib/mem.c`.
+
+FLAC's decode path is **pure integer**. MP3's is not — dr_mp3's synthesis
+filter is plain `float` arithmetic, which on this FPU-less ARM7TDMI the
+compiler lowers to libgcc's soft-float runtime (`__aeabi_fmul` and friends).
+It links and it is bit-exact under the KAT, but it cannot keep the PCM ring
+fed in real time, which is why MP3 is built but parked on the device. See
+[`../README.md`](../README.md), "Audio path".
+
+## FLAC: CRC is ON, and that is a seek decision
+
+`DR_FLAC_NO_CRC` is **not** defined. It used to be, on what looked like
+sound reasoning: dr_flac CRCs every decoded frame on top of the decode, and
+we act on the result nowhere — a failed frame comes back as zero frames,
+which `flac_decode` reports as end-of-stream exactly like a genuine EOS. So
+the check cost cycles and bought nothing.
+
+The reasoning was sound and the conclusion was still wrong, because
+`DR_FLAC_NO_CRC` **also compiles out dr_flac's binary-search seek**:
+
+```c
+#if !defined(DR_FLAC_NO_CRC)
+    if (!wasSuccessful && ...) { ...binary_search(...) }
+#endif
+```
+
+That guard is load-bearing, not incidental: a binary search lands on an
+arbitrary byte and has to decide whether it is looking at a real frame
+header or at audio data that merely resembles a sync code — the header CRC
+is what settles it.
+
+With CRC off, and a library whose files carry **no SEEKTABLE** (verified:
+these FLACs hold STREAMINFO + PICTURE + VORBIS_COMMENT + PADDING and nothing
+else), every seek fell through to brute force — decoding from the start of
+the track. Measured on device 2026-07-27: resuming ~30 s into a track cost
+5.1 s of an 8.4 s cold boot, and the same cost applied to every manual
+scrub.
+
+Trading some per-frame decode margin for O(log n) seeks is the right way
+round. The margin is visible on **Settings → Boot Details** (DECODE, against
+the 22676 µs/kframe real-time budget at 44.1 kHz); if it ever gets tight the
+fix is a seek table in the files, not brute-force seeking. The post-fix seek
+timing has not yet been re-measured on the device.
+
 ## Codec status
 
 | Format | Lib       | Status         | License |
 |--------|-----------|----------------|---------|
-| FLAC   | dr_flac   | ✅ wrapped + KAT | Public domain (Unlicense) / MIT-0 |
-| MP3    | dr_mp3    | ✅ wrapped + KAT | Public domain (Unlicense) / MIT-0 |
+| FLAC   | dr_flac   | ✅ shipping on device | Public domain (Unlicense) / MIT-0 |
+| MP3    | dr_mp3    | ⏸ wrapped + KAT, parked (too slow — see below) | Public domain (Unlicense) / MIT-0 |
 | AAC    | (TBD)     | TODO           | TBD — Helix AAC (RPSL) is the leading candidate |
 | ALAC   | Apple ALAC| TODO           | Apache-2.0 |
 | Vorbis | Tremor    | TODO           | BSD-2 |
@@ -28,9 +80,14 @@ Note on MP3 / AAC: PLAN.md targeted Helix MP3 and Helix AAC for
 absolute decode performance on ARM7. We picked dr_mp3 first because
 its single-header vendoring matches dr_flac's pattern and exercises
 the ABI under a different (lossy, no total_frames at open) shape with
-minimal vendoring complexity. If Helix turns out to materially win on
-cycles/frame at hw-build time, swapping in is one wrapper file —
-the ABI doesn't change.
+minimal vendoring complexity.
+
+That question is now answered: dr_mp3 does not make real time on this CPU
+(soft-float synthesis, see "Freestanding"), so `kernel/main.c` sets
+`CORE_ENABLE_MP3 0` and `.mp3` is not surfaced in the browser at all. A
+fixed-point decoder — Helix MP3 is still the leading candidate — is what
+would unpark it. Swapping one in is one wrapper file; the ABI doesn't
+change.
 
 ## Adding a new codec
 
@@ -64,7 +121,7 @@ Or directly:
 ./build-sim/tests/codec_kat ./tests/codec-vectors
 # expected:
 #   OK: flac decoded 44100 frames, 176400 bytes bit-exact
-#   OK: mp3  decoded 44100 frames, 176400 bytes bit-exact
+#   OK: mp3 decoded 44100 frames, 176400 bytes bit-exact
 ```
 
 ## Test vectors

@@ -54,7 +54,8 @@ typedef struct {
     int  balance;            /* -100..100 — COSMETIC                          */
     int  backlight_secs;     /* 0=never / 5/10/15/30/60 — FUNCTIONAL          */
     int  backlight_bright;   /* 1..32 — FUNCTIONAL                            */
-    int  theme;              /* 0..3; only 0 (Linen) renders — COSMETIC >0    */
+    int  theme;              /* 0 = Linen, 1 = Onyx; BOTH render (palette.c   */
+                             /* theme_set). 2..3 are unused.                  */
     int  clicker;            /* 0/1 — FUNCTIONAL (piezo click on navigation)  */
 
     /*

@@ -64,6 +64,19 @@ Read this before assuming a command does something.
 | `tagcache build` / `dump` | Builds and decodes TCDB — a **host-side** index. The device does not read it (it reads CIDX, from `tools/build_index.py`). See `internal/tagcache/README.md`. |
 | `build hw` / `build sim` | Thin wrapper over `make -C core <target>`. |
 
+**Flashing today does not go through this binary at all.** `make ipod`
+produces `core.ipod` and it is written to the device with the third-party
+`ipodpatcher` (`ipodpatcher <n> -wf core.ipod`, read back with `-rfb` and
+compared). Absorbing that is what `install` / `flash` / `recover` are for.
+
+Note that the shape of the job changed: our firmware is now written **as the
+OSOS image itself**, booting directly from the firmware partition. There is
+no chainloader to install and no bootloader stage to place — `install` writes
+one image and preserves the Apple preamble around it. Some stub help text
+(and `internal/cli/install.go`'s `--bootonly` flag) still describes the older
+"install the bootloader, then our firmware" flow; that wording is stale and
+should go when the command is written.
+
 **Not implemented** — these return `not yet implemented`:
 `flash`, `install`, `update`, `recover`, `info`, `debug`, `sim`,
 `test`, `release`. That is 9 of 12 top-level commands. They are wired

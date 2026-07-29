@@ -233,22 +233,31 @@ static int kern_adv(const atlas_t *a, int prev_gi, int gi) {
 /*
  * Glyph 0 is U+0020: the atlas bakes PRINTABLE = 0x20..0x7E in order, so index
  * 0 is the space by construction (tools/atlas_gen.py).
- *
- * Tracking is suppressed on either side of a space. The cramping it corrects
- * is antialiased INK spilling past a glyph's side bearings into its
- * neighbour's; a space has no ink and already supplies far more daylight than
- * the fringe can eat. Tracking it anyway would widen every word gap by twice
- * the tracking — at 9px that is +1.8px on a 2.3px space, a 78% wider word gap
- * — which reads as deliberately letterspaced text rather than as fixed
- * spacing. (CSS letter-spacing does track spaces; at 9px on a 320px panel that
- * is the wrong call.)
  */
 static int glyph_is_space(int gi) { return gi == 0; }
 
-/* Tracking to insert between `prev_gi` and `gi`, in 26.6. */
+/*
+ * Tracking to insert between `prev_gi` and `gi`, in 26.6.
+ *
+ * A space counts as ONE tracking unit, not zero and not two, and that middle
+ * course is the whole point. Getting it wrong breaks word spacing in opposite
+ * directions:
+ *
+ *   - track both sides (the naive reading of "letter-spacing"): every word gap
+ *     widens by 2x the tracking. At 9px that is +1.8px on a 2.3px space, a 78%
+ *     wider word gap, and the text reads as deliberately letterspaced.
+ *   - exempt the space entirely (what this did first, reasoning that a space
+ *     has no ink for the AA fringe to eat): letter gaps grow while the word gap
+ *     stays put, so words visually MERGE. Measured at bold-11: 1.59px between
+ *     letters against a 2.98px space — "Now Playing" read as one word.
+ *
+ * Applying it on entry to the space but not on exit moves the word gap by
+ * exactly the same amount as every letter gap, so the ratio the face was
+ * designed with survives.
+ */
 static int track_adv(const atlas_t *a, int prev_gi, int gi) {
     if (prev_gi < 0 || gi < 0) return 0;          /* string edge / no glyph */
-    if (glyph_is_space(prev_gi) || glyph_is_space(gi)) return 0;
+    if (glyph_is_space(prev_gi)) return 0;        /* ...but not on the way out */
     return a->tracking;
 }
 

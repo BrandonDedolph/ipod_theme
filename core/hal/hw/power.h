@@ -6,8 +6,8 @@
  * cut: the PMU's always-on domain stays alive to watch the wake sources
  * (a button press, or charger insertion) while everything else loses
  * power. On wake the SoC re-runs the whole boot path — so "turning it
- * back on" is a cold boot of our firmware (via the chainloader), not a
- * resume. See core/docs/hw/06-power.md.
+ * back on" is a cold boot of our firmware — straight from the boot ROM,
+ * with no chainloader in the path. See core/docs/hw/06-power.md.
  */
 #ifndef CORE_HAL_HW_POWER_H
 #define CORE_HAL_HW_POWER_H
